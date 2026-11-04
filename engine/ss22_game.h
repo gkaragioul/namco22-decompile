@@ -94,6 +94,11 @@ typedef struct ss22_game {
      * has no link support here. link_debug: the game's own link state, printed with <TAG>_LINKDBG=1 every 60 frames (NULL = none). */
     void (*link_cabinet)(int id);
     void (*link_debug)(uint32_t frame);
+    /* the EEPROM image is final (the player's saved file loaded, or none): the game may adjust its own operator settings before the
+     * program boots (the Mac build: Time Crisis free play). NULL = none. */
+    void (*eeprom_ready)(void);
+    /* optional (the Mac build's save states, engine/ss22_state.c): a few words on where the player is, shown in the slot list */
+    void (*state_desc)(char *buf, size_t n);
 } ss22_game;
 
 /* Run the game's start script NAME (ss22_game.start) from now: its frame n counts from this call. The Esc menu's way to --stage. */

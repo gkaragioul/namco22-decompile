@@ -64,7 +64,9 @@ bool ss22_host_open(const ss22_host_game *g, int scale, bool fs)      /* scale <
     eng_disp_load(game->cfg_file, scale, fs);                /* the saved display choices; --window N / --fullscreen override */
     if (game->aim) SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");      /* a light gun: the click that focuses the window is still a shot */
     g_eng_disp_light_gun = game->aim != NULL;
-    win = SDL_CreateWindow(game->title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    const int wpos = getenv("ENG_WINDOW_DISPLAY") ? (int)SDL_WINDOWPOS_CENTERED_DISPLAY(atoi(getenv("ENG_WINDOW_DISPLAY")))
+                                                  : (int)SDL_WINDOWPOS_CENTERED;   /* tests: $ENG_WINDOW_DISPLAY=n opens on monitor n */
+    win = SDL_CreateWindow(game->title, wpos, wpos,
                            eng_disp_win_w(g_eng_disp.scale), eng_disp_win_h(g_eng_disp.scale),
                            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
                            (g_eng_disp.winmode ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
@@ -128,14 +130,26 @@ void ss22_host_shot(const char *path)
  * into the picture rectangle; the menu, when open, goes over it. */
 static SDL_Rect pic_r, gun_r;                        /* the last picture rectangle (drawable pixels) and the 4:3 part of it the light gun aims over */
 static eng_pace *pace_log;                           /* set by present_with(): present() times the frame's work into it */
+/* MOTION SMOOTHING (Esc > Smooth motion, engine/ss22_gl.h): at 120 Hz a game frame's first tick shows the in-between picture of the
+ * previous frame and this one (mode 1), its second tick this frame itself, drawn again (mode 2, through eng_vsync's reshow) -- so the
+ * frame is shown half a frame later, as Time Crisis II's smoothing does. Mode 0: the frame as it is. */
+static int present_mode;
 static void present(void)
 {
     int rw, rh, vw, vh;
     eng_disp_render_size(&rw, &rh);
     rt_begin(win, rw, rh, &vw, &vh);
     struct timespec d0, d1; clock_gettime(CLOCK_MONOTONIC, &d0);
-    ss22_draw(vw, vh);
+    if (present_mode == 1) ss22_draw_mid(vw, vh); else ss22_draw(vw, vh);
     clock_gettime(CLOCK_MONOTONIC, &d1);
+    { static long at = -2; extern unsigned g_eng_frame;     /* <tag>_MIDSHOT=<frame>: tests -- the pictures of that frame and the next, */
+      if (at == -2) at = genv("MIDSHOT") ? atol(genv("MIDSHOT")) : -1;   /* in-between ones too, as screenshots/midshot_<frame>_<mode>.ppm */
+      static int cnt = -1; if (cnt < 0) cnt = genv("MIDSHOT_N") ? atoi(genv("MIDSHOT_N")) : 2;   /* <tag>_MIDSHOT_N: that many frames (2) */
+      if (at >= 0 && g_eng_frame >= (unsigned)at && g_eng_frame < (unsigned)(at + cnt)) {
+          char p[96]; mkdir("screenshots", 0755);
+          snprintf(p, sizeof p, "screenshots/midshot_%u_%d.ppm", g_eng_frame, present_mode);
+          eng_gl_write_ppm(p, vw, vh);
+      } }
     { static int on = -1; if (on < 0) on = getenv("ENG_FTIME") != NULL;
       double ms = (d1.tv_sec - d0.tv_sec) * 1e3 + (d1.tv_nsec - d0.tv_nsec) * 1e-6;
       if (on && ms > 40.0) fprintf(stderr, "[FTIME-DRAW] ss22_draw %.1f ms\n", ms); }   /* the engine's draw (quads, sprites, text, post) vs the swap below */
@@ -188,7 +202,9 @@ static void present(void)
         }
     }   /* clears the window round the picture itself; a no-op when rt_begin drew straight into it */
     bool quit = false;
+    g_eng_ui_redraw = present_mode == 2;
     eng_ui_draw(&quit);
+    g_eng_ui_redraw = false;
     { static int dbg = -1, n, shot = -1;             /* <tag>_HOSTDBG=1: what is in the window's back buffer just before it is shown;
                                                       * <tag>_WINSHOT=<n>: that back buffer, whole, to screenshots/<prefix>_window_<n>.ppm at swap n */
       if (dbg < 0) { dbg = genv("HOSTDBG") != NULL; shot = genv("WINSHOT") ? atoi(genv("WINSHOT")) : 0; }
@@ -211,11 +227,29 @@ static void present(void)
               if (eng_gl_write_ppm(p, dw, dh)) fprintf(stderr, "[HOST] saved %s (%dx%d)\n", p, dw, dh);
           }
       } }
-    if (pace_log) eng_pace_before_swap(pace_log);
-    eng_vsync_capture(&vs, win);                     /* the picture, kept for a frame-rate lock above 60 */
+    if (present_mode != 2) {                         /* (a redraw is paced as part of its frame) */
+        if (pace_log) eng_pace_before_swap(pace_log);
+        eng_vsync_capture(&vs, win);                 /* the picture, kept for a frame-rate lock above 60 */
+    } else eng_vsync_wait(vs.pnext);                 /* a redraw: drawn already, out ON its tick */
+    struct timespec s0, s1; clock_gettime(CLOCK_MONOTONIC, &s0);
     SDL_GL_SwapWindow(win);
+    clock_gettime(CLOCK_MONOTONIC, &s1);
+    { static int on = -1; static double sd[3], ss[3], sw[3]; static unsigned cnt[3], tot;   /* ENG_SMOOTHLOG=1: per kind of picture, the draw, the */
+      if (on < 0) on = getenv("ENG_SMOOTHLOG") != NULL;                                     /* tick wait + capture, the swap (ms, means) */
+      if (on) {
+          const int m = present_mode;
+          sd[m] += (d1.tv_sec - d0.tv_sec) * 1e3 + (d1.tv_nsec - d0.tv_nsec) * 1e-6;
+          sw[m] += (s0.tv_sec - d1.tv_sec) * 1e3 + (s0.tv_nsec - d1.tv_nsec) * 1e-6;
+          ss[m] += (s1.tv_sec - s0.tv_sec) * 1e3 + (s1.tv_nsec - s0.tv_nsec) * 1e-6;
+          cnt[m]++;
+          if (++tot % 600 == 0) {
+              for (int k = 0; k < 3; k++) if (cnt[k]) fprintf(stderr, "[SMOOTHLOG] mode %d: %u pictures, draw %.2f ms, then to swap %.2f, swap %.2f\n", k, cnt[k], sd[k] / cnt[k], sw[k] / cnt[k], ss[k] / cnt[k]);
+              memset(sd, 0, sizeof sd); memset(ss, 0, sizeof ss); memset(sw, 0, sizeof sw); memset(cnt, 0, sizeof cnt);
+          }
+      } }
 }
 static void present_with(eng_pace *p) { pace_log = p; present(); pace_log = NULL; }
+static void present_again(void) { present_mode = 2; present(); present_mode = 0; }
 
 /* the window's events: the menu first (it swallows them while open), then the host's own keys. false = quit */
 static bool pump(void)
@@ -279,10 +313,32 @@ bool ss22_host_frame(void)
     if (game->aim) SDL_ShowCursor(eng_ui_is_open() || paused ? SDL_ENABLE : SDL_DISABLE);   /* the crosshair is the pointer */
     else { const int want = (!g_eng_disp.winmode || eng_ui_is_open()) ? SDL_ENABLE : SDL_DISABLE;   /* fullscreen hides the pointer for the game, the menu needs it */
            if (SDL_ShowCursor(SDL_QUERY) != want) SDL_ShowCursor(want); }
+#ifdef GLMC_METAL
+    { void glmc_pointer_hide(void *, int); glmc_pointer_hide(win, game->aim && !eng_ui_is_open() && !paused); }   /* and the system's own hide */
+#endif
     if (!paused && !eng_ui_is_open()) game->input_update();
     if (ftm) clock_gettime(CLOCK_MONOTONIC, &a1);
     eng_vsync_want(&vs, g_eng_disp.fps);            /* Display > Frame rate */
-    if (eng_vsync_show(&vs)) present_with(&pl);     /* a lock below 60 shows only some frames */
+    g_ss22_smooth_want = vs.lock && vs.tp < ENG_FRAME_NS;   /* more than one picture a game frame: the next frames build in-between pictures */
+    if (eng_vsync_show(&vs)) {                       /* a lock below 60 shows only some frames */
+        const bool mid = g_ss22_smooth_want && ss22_mid_ready();
+        vs.reshow = mid ? present_again : NULL;
+        present_mode = mid ? 1 : 0;
+        present_with(&pl);
+        present_mode = 0;
+    }
+    { static unsigned n; if (++n % 600 == 0 && g_ss22_smooth_want && ss22_smooth_on()) {
+        static unsigned long f0, c0;
+        fprintf(stderr, "[SMOOTH] in-between pictures: %lu of the last 600 frames, %lu of them cuts (shown as the frame itself)\n",
+                g_ss22_smooth_frames - f0 - (g_ss22_smooth_cuts - c0), g_ss22_smooth_cuts - c0);
+        f0 = g_ss22_smooth_frames; c0 = g_ss22_smooth_cuts; } }
+    { static unsigned n; static long r0; static int e0, p0; static unsigned long w0, d0;   /* the texture cache, every 600 frames: what churns */
+      extern long g_tex_page_resets; extern unsigned long g_tex_hd_waits, g_tex_hd_redone;
+      if (++n % 600 == 0) {
+          fprintf(stderr, "[TEX] last 600 frames: atlas page resets %ld, evictions %d, placeholders %d, HD drawn native while decoding %lu (redone %lu)\n",
+                  g_tex_page_resets - r0, tex_cache_evictions - e0, tex_placeholders - p0, g_tex_hd_waits - w0, g_tex_hd_redone - d0);
+          r0 = g_tex_page_resets; e0 = tex_cache_evictions; p0 = tex_placeholders; w0 = g_tex_hd_waits; d0 = g_tex_hd_redone;
+      } }
     if (ftm) clock_gettime(CLOCK_MONOTONIC, &a2);
     pace();
     if (ftm) {                                       /* which part of a slow host frame: events / draw+swap / pacing wait */

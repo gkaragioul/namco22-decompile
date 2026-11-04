@@ -59,6 +59,11 @@ static void scan(void)
     const char *want = eng_cfg_get("crosshair_image");
     cur = 0;
     if (want && *want) for (int i = 1; i < nfiles; i++) if (!strcmp(names[i], want)) cur = i;
+#ifdef GLMC_METAL
+    /* never chosen (no crosshair_image= at all; "" is the built-in, chosen): the Mac apps' bundled ring, easier to see than the
+     * built-in cross (Metal has no wide lines, so that one is a 1-pixel cross there) */
+    if (!want) for (int i = 1; i < nfiles; i++) if (!strcmp(names[i], "1 ring green.png")) cur = i;
+#endif
 }
 int eng_xhair_count(void) { scan(); return nfiles - 1; }
 const char *eng_xhair_name(void) { scan(); return cur ? names[cur] : "built-in"; }

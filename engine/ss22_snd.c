@@ -494,3 +494,22 @@ void ss22_snd_debug(char *buf, int n)
              running, faulted, cpu.pg, cpu.pc, (unsigned long long)cpu.irq_taken, (unsigned long long)cpu.cycles,
              cpu.ps, outputs, (unsigned)(g_ss22_game->snd.inputs_idle & ~pressed), adc[0], adc[g_ss22_game->snd.adc_pedal[0]], adc[g_ss22_game->snd.adc_pedal[1]]);
 }
+
+#ifdef GLMC_METAL
+/* SAVE STATES: the MCU (its bus and port hooks stay this run's), its internal RAM, the C352 (its sample ROM pointer stays), the board
+ * time bookkeeping and the I/O latches. Not the held inputs (the player's hands now) or the speaker levels (settings). */
+#include "eng_state.h"
+void ss22_snd_state(eng_st *s)
+{
+    ST_KEEP_BEGIN(s, cpu);
+    ST_KEEP(cpu, ops); ST_KEEP(cpu, read8); ST_KEEP(cpu, write8); ST_KEEP(cpu, user); ST_KEEP(cpu, port_r); ST_KEEP(cpu, port_w);
+    ST_KEEP_END();
+    ST(s, iram); ST(s, c352sh);
+    ST_KEEP_BEGIN(s, chip);
+    ST_KEEP(chip, rom);
+    ST_KEEP_END();
+    ST(s, ready); ST(s, running); ST(s, faulted); ST(s, chip_ok);
+    ST(s, cyc_owed); ST(s, grid); ST(s, base); ST(s, pin_n); ST(s, pin_shift); ST(s, want_phase); ST(s, chip_done);
+    ST(s, adc); ST(s, iocontrol); ST(s, outdata); ST(s, outputs); ST(s, mb_ctrl); ST(s, mb_latch);
+}
+#endif

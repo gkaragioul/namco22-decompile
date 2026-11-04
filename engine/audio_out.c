@@ -123,6 +123,21 @@ void eng_audio_set_volume(int percent) { g_volume = (percent < 0 ? 0 : percent >
 
 void eng_audio_push(const int16_t *in4, int n)
 {
+    {   /* ENG_AUDIO_CAPTURE=<file> (videos, tests): every sample the board makes, mixed to stereo s16 at the board's 85333.33 Hz, before the
+         * sound card's ring -- so the file keeps the emulation's own timeline exactly, however the card was paced (no drops, no gaps) */
+        static FILE *cap; static int cap_on = -1;
+        if (cap_on < 0) { const char *p = getenv("ENG_AUDIO_CAPTURE"); cap = p ? fopen(p, "wb") : NULL; cap_on = cap != NULL; }
+        if (cap_on && n > 0) {
+            for (int i = 0; i < n; i++) {
+                int16_t o[2];
+                for (int ch = 0; ch < 2; ch++) {
+                    const int16_t *s = &in4[i * 4];
+                    o[ch] = (int16_t)lrint(soft_limit((s[0] * g_mix[ch][0] + s[1] * g_mix[ch][1] + s[2] * g_mix[ch][2] + s[3] * g_mix[ch][3]) * g_volume * g_out_gain));
+                }
+                fwrite(o, sizeof o, 1, cap);
+            }
+        }
+    }
     if (!dev || n <= 0) return;
     {   /* a starved sound card is heard as pops: say so in the log, at most every 3 s */
         static uint32_t last_ms, seen_ur, seen_rs;

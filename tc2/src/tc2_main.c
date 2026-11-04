@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include "lift_rt.h"
 #include "tc2_lifted.h"
 #include "tc2_host.h"
@@ -112,6 +113,11 @@ static void scripted_inputs(uint32_t frame)
 /* THE GPU GATE: $TC2_GPU_GATE=dir:every -- a hidden GL context in a headless run; every N frames the same built frame is drawn by the GPU
  * back end (src/tc2_gl.c) and by the software one (the oracle), both written as PPMs, and the difference reported */
 #include <SDL2/SDL.h>
+#ifdef GLMC_METAL
+/* The hidden comparison gate must create the same Metal-backed context as
+ * the game window, rather than an unrelated SDL OpenGL context. */
+#include <SDL2/SDL_opengl.h>
+#endif
 #include "tc2_build.h"
 #include "eng/win_gpu.h"   /* Windows: run on the discrete GPU of a two-GPU laptop */
 static void ppm(const char *path, const uint32_t *px)
@@ -227,6 +233,13 @@ void tc2_on_vblank(uint32_t frame)
     { static int tf = -2; static const char *tp; if (tf == -2) { const char *e = getenv("TC2_TEXTDUMP"); tf = -1; if (e) { tf = atoi(e); tp = strchr(e, ':'); if (tp) tp++; } }
       if (tf >= 0 && (int)frame == tf && tp) {   /* $TC2_TEXTDUMP=frame:file -- the C361 character RAM + tile map (0x06800000-0x0681FFFF), big-endian */
           uint8_t *tc2_vram_ptr(uint32_t); FILE *f = fopen(tp, "wb"); if (f) { fwrite(tc2_vram_ptr(0x06800000u), 1, 0x20000, f); fclose(f); } } }
+    { static int every = -2; static const char *dir; if (every == -2) { const char *e = getenv("TC2_TEXTDUMPS"); every = -1; if (e) { every = atoi(e); dir = strchr(e, ':'); if (dir) dir++; } }
+      if (every > 0 && dir && frame % (unsigned)every == 0) {   /* $TC2_TEXTDUMPS=every:dir -- tests: the C361 character RAM + tile map every N frames */
+          uint8_t *tc2_vram_ptr(uint32_t); char path[600]; snprintf(path, sizeof path, "%s/text_f%u.bin", dir, frame);
+          FILE *f = fopen(path, "wb"); if (f) { fwrite(tc2_vram_ptr(0x06800000u), 1, 0x20000, f); fclose(f); } } }
+    { static int every = -2; static const char *dir; if (every == -2) { const char *e = getenv("TC2_RAMDUMP"); every = -1; if (e) { every = atoi(e); dir = strchr(e, ':'); if (dir) dir++; } }
+      if (every > 0 && dir && frame % (unsigned)every == 0) {   /* $TC2_RAMDUMP=every:dir -- tests: the first 4 MB of main RAM, every N frames */
+          char path[600]; snprintf(path, sizeof path, "%s/ram_f%u.bin", dir, frame); FILE *f = fopen(path, "wb"); if (f) { fwrite(tc2_ram, 1, 0x400000, f); fclose(f); } } }
     static int pclog = -1; if (pclog < 0) pclog = getenv("TC2_PCLOG") != NULL;
     if (pclog) fprintf(stderr, "[PC] frame %u pc %08X\n", frame, rr_pc);
     { void tc2_render_frame_end(void); tc2_render_frame_end(); }   /* the picture: background, text, the 3D render list (src/tc2_render.c) */
@@ -283,8 +296,10 @@ const char *tc2_instance(void)
     if (!init) { init = 1; const char *e = getenv("TC2_INSTANCE"); const int n = e ? atoi(e) : 0; if (n >= 2 && n <= 99) snprintf(suf, sizeof suf, "_%d", n); }
     return suf;
 }
+char **g_tc2_argv;                                           /* File > Restart (src/tc2_window.c) */
 int main(int argc, char **argv)
 {
+    g_tc2_argv = argv;
 #ifdef _WIN32
     /* Windows: a double-click or a shortcut starts us anywhere -- work in the program's own folder (roms/, extracted/, tc2.cfg, the
      * backup RAM), and with no console the log goes to tc2.log beside the .exe (what the crash message points at) */
@@ -297,23 +312,25 @@ int main(int argc, char **argv)
     if (argc < 2) { win_argv[0] = argv[0]; argv = win_argv; argc = 2; }
     if (argc > 2 && strcmp(argv[1], "--window")) ins_limit = strtoull(argv[2], NULL, 0);
     char p[1024];
+    /* $TIMECRIS2_ROMS: a ROM folder elsewhere (the Mac app's own Resources/extracted, the saves staying in the working folder) */
+    const char *rom_dir = getenv("TIMECRIS2_ROMS"); if (!rom_dir || !*rom_dir) rom_dir = "extracted";
     /* the ROM folder: from the player's timecrs2.zip on the first run (src/tc2_rom.c), then the boot image made from it */
     {
         char exe_dir[1024] = ".";
         { char *bp = SDL_GetBasePath();                  /* the program's own folder, on every system (was /proc/self/exe) */
           if (bp) { snprintf(exe_dir, sizeof exe_dir, "%s", bp); size_t k = strlen(exe_dir); while (k > 1 && (exe_dir[k - 1] == '/' || exe_dir[k - 1] == '\\')) exe_dir[--k] = 0; SDL_free(bp); } }
         int tc2_rom_setup(const char *, const char *), tc2_rom_boot(const char *, uint8_t *);
-        if (!tc2_rom_setup("extracted", exe_dir) || !tc2_rom_boot("extracted", tc2_boot)) {
+        if (!tc2_rom_setup(rom_dir, exe_dir) || !tc2_rom_boot(rom_dir, tc2_boot)) {
             extern char tc2_rom_error[];                  /* a window run (a double-click): say it on screen, there may be no console */
             if (!strcmp(argv[1], "--window")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, tc2_game.title,
                 tc2_rom_error[0] ? tc2_rom_error : "The game could not read its ROM files in extracted/ (see the log).", NULL);
             return 1;
         }
     }
-    { int tc2_load_data(const char *); if (!tc2_load_data("extracted")) return 1; }
+    { int tc2_load_data(const char *); if (!tc2_load_data(rom_dir)) return 1; }
     if (strcmp(argv[1], "--window")) { void tc2_link_init(void); tc2_link_init(); }   /* headless: online only through $TC2_NET_* */
-    { void tc2_h8_init(const char *); tc2_h8_init("extracted"); }
-    { void tc2_render_init(const char *); tc2_render_init("extracted"); }
+    { void tc2_h8_init(const char *); tc2_h8_init(rom_dir); }
+    { void tc2_render_init(const char *); tc2_render_init(rom_dir); }
     if (getenv("TC2_NO_RASTER")) { void tc2_render_soft(int); tc2_render_soft(0); }   /* profiling: the CPU work of a GPU run (no software fill) */
     /* POWER-ON ("reset" instead of a snapshot): the R4650's reset state as MAME's mips3 device_reset gives it -- PC at the reset vector
      * 0xBFC00000 (KSEG1, the boot ROM), Status = BEV | ERL, Compare 0xFFFFFFFF, Count 0, PRId 0x2200 (R4650), the FPU's FIR the same; main
@@ -367,6 +384,21 @@ int main(int argc, char **argv)
         tc2_irq_set(TC2_SRC_VBLANK, 1);
         tc2_poll_irq();
     }
+#ifdef GLMC_METAL
+    /* a LOADED save comes back here (src/tc2_state.c): every C frame of the running program is dropped and the restored one resumes at
+     * the saved loop's target; its returns rebuild the call chain from the MIPS stack */
+    { extern jmp_buf g_tc2_resume_jb; extern uint32_t g_tc2_resume_pc;
+      if (setjmp(g_tc2_resume_jb)) {
+          for (;;) {
+              rr_jump(g_tc2_resume_pc, g_tc2_resume_pc);
+              fprintf(stderr, "[STATE] the resumed program came back to the top (ret_to %08X)\n", rr_ret_to);
+              if (!rr_ret_to || rr_ret_to == 0xFFFFFFFFu) break;
+              g_tc2_resume_pc = rr_ret_to;
+          }
+          tc2_on_exit();
+          return 0;
+      } }
+#endif
     rr_jump(pc, pc);
     fprintf(stderr, "[TC2] the lifted program returned to the host at %08X\n", rr_pc);
     tc2_on_exit();

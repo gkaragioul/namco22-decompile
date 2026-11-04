@@ -46,6 +46,12 @@ static bool tc_load_program(const char *dir)
         }
         fclose(f);
     }
+#ifdef GLMC_METAL
+    {   /* the title's free-play prompt, in the player's terms: the pedal is the right mouse button (same length: it stays centred) */
+        static const char from[] = "STEP ON PEDAL TO START@", to[] = " RIGHT CLICK TO START @";
+        if (!memcmp(g_ss22.rom + 0x1816D, from, sizeof from - 1)) memcpy(g_ss22.rom + 0x1816D, to, sizeof to - 1);
+    }
+#endif
     return true;
 }
 
@@ -58,6 +64,54 @@ static bool tc_load_eeprom(const char *dir)
     return true;
 }
 
+#ifdef GLMC_METAL
+/* NO COINS (the Mac build): the game's own COIN OPTIONS > FREE PLAY, always on. 0x1166 is the flag; the header byte 0x0006 is a
+ * checksum the game verifies (setting the flag alone makes it reset the options), and it moves with the flag in the test menu, +1 for
+ * 0 -> 1. A blank EEPROM (a new install: MAME's all-0xFF, which the game would format with coins) starts from the image the game formats,
+ * free play already set. A saved file keeps everything else (records, other options). */
+#include "tc_eeprom_freeplay.h"
+/* an operator setting in the EEPROM image: the header's 0x0004..0x0007 is a BE32 sum of the settings as BE32 words, so a byte's change
+ * moves the checksum at its place in its word (found by changing each option in the test menu: 0x1166 -> 0x0006, 0x1167 -> 0x0007,
+ * 0x1168 -> 0x0004). Settings: 0x1166 free play 0/1, 0x1167 player's life 1..5 (3), 0x1168 time limit 0 very long .. 4 very short (2). */
+void tc_option_set(uint32_t a, uint8_t v)
+{
+    uint8_t *e = g_ss22.eeprom;
+    const int d = (int)v - (int)e[a];
+    if (!d) return;
+    e[a] = v;
+    uint32_t ck = (uint32_t)e[4] << 24 | (uint32_t)e[5] << 16 | (uint32_t)e[6] << 8 | e[7];
+    ck += (uint32_t)((int32_t)d * (1 << (8 * (3 - (int)(a % 4)))));
+    e[4] = (uint8_t)(ck >> 24); e[5] = (uint8_t)(ck >> 16); e[6] = (uint8_t)(ck >> 8); e[7] = (uint8_t)ck;
+}
+uint8_t tc_option_get(uint32_t a) { return g_ss22.eeprom[a]; }
+/* the simple Esc menu's Difficulty (the TIME LIMIT option: in Time Crisis a shorter clock is the harder game) and Lives */
+#include "eng_ui.h"
+static const char *const tc_diff_names[5] = { "Very easy", "Easy", "Normal", "Hard", "Very hard" };
+static const char *const tc_life_names[5] = { "1", "2", "3", "4", "5" };
+/* Continues Off (ours: the game has no such option): while a game is on (mode 3) with no lives left -- the CONTINUE? YES / NO
+ * countdown, then GAME OVER -- the trigger is not passed on, so YES cannot be shot and the countdown runs out. Saved as continues=. */
+#include "eng_cfg.h"
+static int tc_continues = -1;
+static int  tc_cont_on(void) { if (tc_continues < 0) tc_continues = eng_cfg_int("continues", 1) != 0; return tc_continues; }
+static const char *const tc_cont_names[2] = { "Off", "On" };
+static int  tc_opt_count(int w) { return w == 2 ? 2 : 5; }
+static int  tc_opt_get(int w)   { if (w == 2) return tc_cont_on(); const int v = w ? tc_option_get(0x1167) - 1 : tc_option_get(0x1168); return v < 0 ? 0 : v > 4 ? 4 : v; }
+static void tc_opt_set(int w, int i)
+{
+    if (w == 2) { tc_continues = i != 0; eng_cfg_set_int("continues", tc_continues); return; }
+    if (w) tc_option_set(0x1167, (uint8_t)(i + 1)); else tc_option_set(0x1168, (uint8_t)i);
+}
+static const char *tc_opt_name(int w, int i) { return w == 2 ? tc_cont_names[i] : w ? tc_life_names[i] : tc_diff_names[i]; }
+static const eng_ui_game_opts tc_opts = { tc_opt_count, tc_opt_get, tc_opt_set, tc_opt_name };
+static void tc_eeprom_ready(void)
+{
+    eng_ui_set_game_options(&tc_opts);
+    uint8_t *e = g_ss22.eeprom;
+    if (memcmp(e, "V159", 4)) { memcpy(e, tc_eeprom_freeplay, sizeof tc_eeprom_freeplay); fprintf(stderr, "[TC] free play (a new EEPROM)\n"); return; }
+    if (e[0x1166] == 0) { tc_option_set(0x1166, 1); fprintf(stderr, "[TC] free play turned on\n"); }
+}
+#endif
+
 /* keycus: Time Crisis is in none of namcos22_keycus_r's cases, so every read is random (a unit that is never asked: 0xFFFF); the light gun is the extra device */
 static const ss22_board_cfg tc_board = { "TC", 0xFFFF, 0, tc_load_program, tc_load_eeprom, ss22_gun_read };
 
@@ -69,18 +123,36 @@ static const ss22_board_cfg tc_board = { "TC", 0xFFFF, 0, tc_load_program, tc_lo
 #define IN_TRIGGER 0x0010
 #define IN_PEDAL   0x0020
 static const ss22_action actions[] = {
+#ifndef GLMC_METAL                                  /* the Mac build has no coins (free play): no coin key */
     { "Insert coin",  "coin",    SDL_SCANCODE_5,      SDL_SCANCODE_6,       IN_COIN,    0, SS22_PAD(SDL_CONTROLLER_BUTTON_BACK) },
+#endif
     { "Gun trigger",  "trigger", SDL_SCANCODE_SPACE,  SDL_SCANCODE_RETURN,  IN_TRIGGER, 0, SS22_PAD(SDL_CONTROLLER_BUTTON_A) | SS22_PAD(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER), SDL_BUTTON_LMASK },
     { "Foot pedal",   "pedal",   SDL_SCANCODE_Z,      SDL_SCANCODE_X,       IN_PEDAL,   0, SS22_PAD(SDL_CONTROLLER_BUTTON_B) | SS22_PAD(SDL_CONTROLLER_BUTTON_LEFTSHOULDER), SDL_BUTTON_RMASK | SDL_BUTTON_MMASK },
     { "Service",      "service", SDL_SCANCODE_9,      SDL_SCANCODE_UNKNOWN, IN_SERVICE, 0, 0 },
     { "Test",         "test",    SDL_SCANCODE_F2,     SDL_SCANCODE_UNKNOWN, IN_TEST,    0, 0 },
 };
+#ifdef GLMC_METAL
+static int tc_cont_on(void);
+static void tc_send_inputs(uint16_t pressed, unsigned wheel, unsigned pedal1, unsigned pedal2)
+{
+    if (!tc_cont_on() && g_ss22.wram[0x0733] == 3 && g_ss22.wram[0x0791] == 0) pressed &= (uint16_t)~IN_TRIGGER;   /* Continues Off */
+    pressed &= (uint16_t)~IN_COIN;                  /* no coins: in free play a coin still counted, and moved the game on */
+    ss22_snd_inputs(pressed, wheel, pedal1, pedal2);
+}
+#define TC_SEND tc_send_inputs
+#else
+#define TC_SEND ss22_snd_inputs
+#endif
 static const ss22_input_game input = {
     actions, (int)(sizeof actions / sizeof *actions),
     0x001, 0x3FF, 0x1FF, 12,
     { 0, 0 }, 0,
+#ifdef GLMC_METAL
+    { "Enter, then press the new key (Esc cancels)", "Mouse / absolute-mouse gun aims: left = trigger, right/middle = pedal (starts the game); screen edge, R or side button = off-screen (reload). F8 = gun border", "Pad: either stick or the D-pad aims, A/RB trigger, B/LB pedal. Arrow keys aim too" },
+#else
     { "Enter, then press the new key (Esc cancels)", "Mouse / absolute-mouse gun aims: left = trigger, right/middle = pedal; screen edge, R or side button = off-screen (reload). F8 = gun border", "Pad: either stick or the D-pad aims, A/RB trigger, B/LB pedal, Back coin. Arrow keys aim too; 5 = coin" },
-    ss22_snd_inputs,
+#endif
+    TC_SEND,
     IN_TEST, IN_SERVICE,
     false,                                  /* no steering motor (the gun recoil is the aux PCB: not emulated) */
     .light_gun = true,                      /* the light gun: the pointer aims (engine/ss22_input.c). NAMED, not positional: 0.6.0 put kick_wheel
@@ -153,6 +225,14 @@ static void autoplay(long n, uint16_t *p, unsigned *wheel, unsigned *pedal1, uns
 #define TC_W_TIMER 0x0796
 #define TC_W_MODE  0x0733
 #define TC_W_LIVES 0x0791
+#ifdef GLMC_METAL
+static void tc_state_desc(char *b, size_t n)                  /* the save slot list's words (engine/ss22_state.c) */
+{
+    const int l = g_ss22.wram[TC_W_LIVES];
+    if (g_ss22.wram[TC_W_MODE] == 3) snprintf(b, n, "%d %s left", l, l == 1 ? "life" : "lives");
+    else snprintf(b, n, "title / demo");
+}
+#endif
 static uint16_t wram16(uint32_t a) { return (uint16_t)(g_ss22.wram[a] << 8 | g_ss22.wram[a + 1]); }
 static void wram16_set(uint32_t a, uint16_t v) { g_ss22.wram[a] = (uint8_t)(v >> 8); g_ss22.wram[a + 1] = (uint8_t)v; }
 static void tc_frame(long n)
@@ -161,6 +241,10 @@ static void tc_frame(long n)
     static int lives_log = -1, last_mode = -1, last_lives = -1;
     if (inf_time < 0) { inf_time = getenv("TC_INF_TIME") != NULL; inf_life = getenv("TC_INF_LIFE") != NULL; }
     if (lives_log < 0) lives_log = getenv("TC_LIVESLOG") != NULL;            /* TC_LIVESLOG=1: the mode and lives byte on every change */
+#ifdef GLMC_METAL
+    if (g_ss22.wram[TC_W_MODE] == 2) eng_ui_set_hint("Right click (or Z) to start  -  Esc for the menu", 2);   /* the attract: how to start (the title only says FREE PLAY;
+                                                                                * free play waits for the pedal) */
+#endif
     if (lives_log && n >= 600 && (g_ss22.wram[TC_W_MODE] != last_mode || g_ss22.wram[TC_W_LIVES] != last_lives)) {
         last_mode = g_ss22.wram[TC_W_MODE]; last_lives = g_ss22.wram[TC_W_LIVES];
         fprintf(stderr, "[LIVES] frame %ld mode %d lives %d\n", n, last_mode, last_lives);
@@ -196,6 +280,7 @@ static bool start(const char *name, long n, uint16_t *p, unsigned *wheel, unsign
     if (t >= 900) return false;
     g_ss22_gun_off = false;
     if ((t < 6) || (t >= 40 && t < 46) || (t >= 80 && t < 86)) *p |= IN_COIN;
+    if (t >= 100 && t < 106) *p |= IN_PEDAL;                                  /* free play: STEP ON PEDAL TO START (with coins it is no press at all) */
     if (t < 330) { g_ss22_gun_x = AIM_TIMED_X; g_ss22_gun_y = AIM_TIMED_Y; }  /* SELECT GAME MODE comes up ~120 frames after the first coin */
     else { g_ss22_gun_x = aim_stage_x[st]; g_ss22_gun_y = AIM_STAGE_Y; }     /* the stage screen, ~240 frames after that */
     if (t >= 140 && t % 40 < 4) *p |= IN_TRIGGER;                             /* a shot between the boxes hits nothing */
@@ -222,6 +307,10 @@ static const ss22_game game = {
     .input = &input,
     .roms = k_roms, .n_roms = NROMS,
     .entry = L_110D0,
+#ifdef GLMC_METAL
+    .eeprom_ready = tc_eeprom_ready,
+    .state_desc = tc_state_desc,
+#endif
     .polls_per_frame = 67000,               /* measured on MAME's register trace at T3 */
     .presses = presses, .n_presses = (int)(sizeof presses / sizeof *presses),
     .autoplay = autoplay,

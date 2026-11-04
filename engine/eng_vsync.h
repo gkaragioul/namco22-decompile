@@ -53,6 +53,9 @@ typedef struct {
     unsigned char sample[16][4]; int check;          /* ENG_VSYNC_CHECK: 16 pixels of the original; -1 unset */
     unsigned log_frames, log_pics, log_checked, log_bad; uint64_t log_t0; int log_on;
     bool forced;                                     /* ENG_FPS set: the menu's choice is ignored */
+    unsigned refresh_seen;                           /* g_eng_disp_refresh_serial last applied (eng_display.h) */
+    void (*reshow)(void);                            /* set: the extra ticks DRAW this frame again with it (then wait for pnext, swap), not re-showing
+                                                      * the kept copy -- motion smoothing showed an in-between picture first (ss22_host.c) */
 } eng_vsync;
 
 static inline uint64_t eng_vsync_ns(void)          /* SDL's counter (works on Windows too); split so counter * 1e9 cannot overflow */
@@ -134,7 +137,18 @@ static inline void eng_vsync_init(eng_vsync *v, SDL_Window *win, const char *for
 }
 
 /* the menu's choice (called every frame; a no-op unless it changed) */
-static inline void eng_vsync_want(eng_vsync *v, int fps) { if (!v->forced) eng_vsync_set_lock(v, fps); }
+static inline void eng_vsync_want(eng_vsync *v, int fps)
+{
+    extern int g_eng_disp_refresh; extern unsigned g_eng_disp_refresh_serial;
+    if (v->refresh_seen != g_eng_disp_refresh_serial) {   /* the display's refresh changed (a fullscreen refresh switch): Auto follows it */
+        v->refresh_seen = g_eng_disp_refresh_serial;
+        if (g_eng_disp_refresh > 0 && !getenv("ENG_DISPLAY_HZ") && g_eng_disp_refresh != v->hz) {
+            fprintf(stderr, "[HOST] display now %d Hz\n", g_eng_disp_refresh);
+            v->hz = g_eng_disp_refresh; v->choice = -1;     /* re-apply the choice at the new rate */
+        }
+    }
+    if (!v->forced) eng_vsync_set_lock(v, fps);
+}
 
 /* this game frame: is a picture due? (AUTO: always) */
 static inline bool eng_vsync_show(eng_vsync *v)
@@ -157,7 +171,7 @@ static inline void eng_vsync_capture(eng_vsync *v, SDL_Window *win)
 {
     v->shown = true;
     if (v->lock && v->pnext < v->next_ns + ENG_FRAME_NS) eng_vsync_wait(v->pnext);   /* the picture goes out ON its tick: even spacing */
-    if (!v->lock || v->tp >= ENG_FRAME_NS) return;  /* nothing to show twice */
+    if (!v->lock || v->tp >= ENG_FRAME_NS || v->reshow) return;  /* nothing to show twice (or it is drawn again: no copy) */
     int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
     if (w <= 0 || h <= 0) return;
     unsigned tw = 1, th = 1; while (tw < (unsigned)w) tw <<= 1; while (th < (unsigned)h) th <<= 1;
@@ -266,7 +280,10 @@ static inline void eng_vsync_after_frame(eng_vsync *v, SDL_Window *win)
         v->pnext += v->tp;                                       /* the frame's own picture took the first tick */
     }
     while (v->pnext < end) {                                     /* the extra ticks: the same picture again */
-        if (v->shown && v->tex && win) {
+        if (v->shown && win && v->reshow) {
+            v->reshow();                                         /* draws, waits for v->pnext, swaps: drawn first, so it is on time */
+            v->log_pics++;
+        } else if (v->shown && v->tex && win) {
             eng_vsync_wait(v->pnext);
             eng_vsync_redraw(v, win);
             SDL_GL_SwapWindow(win);

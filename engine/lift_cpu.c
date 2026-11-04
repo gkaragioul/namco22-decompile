@@ -222,3 +222,17 @@ void rr_deliver_irqs(int (*level_fn)(void))
         if (level_fn() == lvl) return;
     }
 }
+
+#ifdef GLMC_METAL
+/* SAVE STATES (engine/eng_state.h): the register file and the counters. The shadow stack is NOT saved: a load resumes the program at a
+ * loop's branch target with no C frames under it, and every rts then finds no shadow entry and continues as a jump to the address it
+ * popped -- the lifted code's own fallback -- so the call chain rebuilds itself from the 68K stack in work RAM. */
+#include "eng_state.h"
+uint32_t rr_pc_now;
+void rr_state(eng_st *s)
+{
+    st_io(s, R, sizeof R);
+    ST(s, rr_frame); ST(s, rr_budget); ST(s, rr_n_irq);
+    if (s->dir == 2) { sh_n = 0; sh_target = -1; rr_in_irq = 0; rr_ret_to = 0; }
+}
+#endif

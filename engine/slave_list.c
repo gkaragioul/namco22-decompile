@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include "eng.h"
 #include "geo_hw.h"
 #include "slave_list.h"
@@ -173,4 +174,114 @@ int eng_walk_list(eng_word_fn pw, const eng_list_cfg *cfg, geo_quad_cb cb, void 
     if (cfg->out_zoom_mant) { *cfg->out_zoom_mant = zoom_mant; *cfg->out_zoom_shift = zoom_shift;
                               *cfg->out_vx = vx; *cfg->out_vy = vy; }
     return prims;
+}
+
+/* ---- MOTION SMOOTHING (the Mac build; Esc > Smooth motion) ----------------------------------------------------------------------
+ * The board makes 59.906 pictures a second; at 120 Hz the window can show one more between two of them. It is made here, not by the
+ * board: a copy of frame N's list whose records are moved part of the way back towards frame N-1 -- each viewport's and view
+ * transform's camera matrix, each model's matrix and position -- then walked like any frame (as tc2/src/tc2_render.c does for Time
+ * Crisis II). A record is matched with the same kind (a model: the same code) by OCCURRENCE: the k-th of a kind in frame N goes with
+ * the k-th of that kind in frame N-1. Not moved: a record with no partner, one that jumped more than a third of its distance or turned
+ * more than ~40 degrees in one frame (a new object in a reused slot). A cut -- the camera turned that far, under half the models found
+ * a partner, or over a quarter of the partners jumped -- gives frame N itself. Not the board's picture: nothing here is checked
+ * against MAME. */
+typedef struct { uint32_t key; int seq, p, len; } mid_rec;
+static int mid_cmp(const void *x, const void *y)
+{
+    const mid_rec *a = x, *b = y;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->seq - b->seq;
+}
+/* the records of one list, in list order: key = kind (1 viewport, 2 view transform, 3 << 16 | code a model), seq = its occurrence */
+static int mid_records(const uint32_t *w, int head, mid_rec *out, int max)
+{
+    int src = head, n = 0, guard = 0;
+    while (guard++ < 4096 && n < max) {
+        const uint32_t code = w[src & 0x7FFF] & 0xFFFF, len = w[(src + 1) & 0x7FFF] & 0xFFFF;
+        uint32_t key = 0;
+        if (len == 0x15) key = 1;
+        else if (len == 0x0a) key = 2;
+        else if (len == 0x0d) { if (code == 0x5 || code >= 0x45) key = 3u << 16 | code; }
+        else if (len != 0x10) break;
+        if (key) { out[n].key = key; out[n].p = src + 2; out[n].len = (int)len; out[n].seq = 0; n++; }
+        const int nxt = (int)(w[(src + len + 3) & 0x7FFF] & 0x7FFF);
+        if (nxt != src + (int)len + 4) break;
+        src = nxt;
+    }
+    return n;
+}
+static double mid_len(const double v[3]) { return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+/* a Q15 3x3 at w[base + col*3 + row] (a's at abase, b's and o's at base): b's moved a fraction f back towards a, into o.
+ * 0 = turned too far (o untouched) */
+static int mid_matrix(const uint32_t *a, int abase, const uint32_t *b, uint32_t *o, int base, double f)
+{
+    double m[3][3];
+    for (int r = 0; r < 3; r++) {
+        double va[3], vb[3];
+        for (int c = 0; c < 3; c++) { va[c] = q15v(a[(abase + c * 3 + r) & 0x7FFF]); vb[c] = q15v(b[(base + c * 3 + r) & 0x7FFF]); }
+        const double la = mid_len(va), lb = mid_len(vb);
+        if (la < 1 || lb < 1) { for (int c = 0; c < 3; c++) m[r][c] = vb[c]; continue; }
+        if ((va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2]) / (la * lb) < 0.766) return 0;   /* turned more than ~40 degrees */
+        double v[3]; for (int c = 0; c < 3; c++) v[c] = vb[c] + (va[c] - vb[c]) * f;
+        const double l = mid_len(v), want = lb + (la - lb) * f;
+        for (int c = 0; c < 3; c++) m[r][c] = l > 0 ? v[c] * want / l : vb[c];
+    }
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
+        const int i = (base + c * 3 + r) & 0x7FFF;
+        long q = lround(m[r][c]); if (q > 32767) q = 32767; if (q < -32768) q = -32768;
+        o[i] = (b[i] & 0xFFFF0000u) | ((uint32_t)q & 0xFFFFu);
+    }
+    return 1;
+}
+int eng_list_mid(const uint32_t *a, const uint32_t *b, uint32_t *out, int head, double f)
+{
+    enum { MAXR = 4096 };
+    static mid_rec ra[MAXR], rb[MAXR];
+    memcpy(out, b, sizeof(uint32_t) * 0x8000);
+    const int na = mid_records(a, head, ra, MAXR), nb = mid_records(b, head, rb, MAXR);
+    if (!na || !nb) return 0;
+    /* occurrence numbers: count each key in list order (a small open-addressed table of counters) */
+    for (int pass = 0; pass < 2; pass++) {
+        mid_rec *r = pass ? rb : ra; const int n = pass ? nb : na;
+        static uint32_t hk[8192]; static int hc[8192];
+        memset(hk, 0, sizeof hk);
+        for (int i = 0; i < n; i++) {
+            unsigned h = (r[i].key * 2654435761u) >> 19;
+            while (hk[h] && hk[h] != r[i].key) h = (h + 1) & 8191;
+            if (!hk[h]) { hk[h] = r[i].key; hc[h] = 0; }
+            r[i].seq = hc[h]++;
+        }
+    }
+    qsort(ra, (size_t)na, sizeof ra[0], mid_cmp);
+    int models = 0, matched = 0, jumped = 0;
+    for (int i = 0; i < nb; i++) {
+        const mid_rec *pb = &rb[i];
+        if (pb->key >> 16 == 3) models++;
+        const mid_rec *pa = bsearch(pb, ra, (size_t)na, sizeof ra[0], mid_cmp);
+        if (!pa) continue;
+        if (pb->key == 1 || pb->key == 2) {                   /* the camera */
+            const int off = pb->key == 1 ? 0x0c : 1;
+            if (!mid_matrix(a, pa->p + off, b, out, pb->p + off, f)) { memcpy(out, b, sizeof(uint32_t) * 0x8000); return 0; }
+            continue;
+        }
+        matched++;
+        /* the model's position: sext24 at p + 0x0a..0x0c */
+        double ta[3], tb[3], d[3];
+        for (int k = 0; k < 3; k++) {
+            ta[k] = sext_n(a[(pa->p + 0x0a + k) & 0x7FFF], 24); tb[k] = sext_n(b[(pb->p + 0x0a + k) & 0x7FFF], 24); d[k] = tb[k] - ta[k];
+        }
+        const double dist = mid_len(d), r = mid_len(ta) > mid_len(tb) ? mid_len(ta) : mid_len(tb);
+        if (dist > 64.0 && dist > r / 3.0) { jumped++; continue; }
+        /* the matrix first (it can refuse: a turn too far), then the position */
+        uint32_t keep[9];
+        for (int k = 0; k < 9; k++) keep[k] = out[(pb->p + 1 + k) & 0x7FFF];
+        if (!mid_matrix(a, pa->p + 1, b, out, pb->p + 1, f)) { for (int k = 0; k < 9; k++) out[(pb->p + 1 + k) & 0x7FFF] = keep[k]; jumped++; continue; }
+        for (int k = 0; k < 3; k++) {
+            const int idx = (pb->p + 0x0a + k) & 0x7FFF;
+            const long v = lround(tb[k] + (ta[k] - tb[k]) * f);
+            out[idx] = (b[idx] & 0xFF000000u) | ((uint32_t)v & 0xFFFFFFu);
+        }
+    }
+    if (models && (matched * 2 < models || jumped * 4 > matched)) { memcpy(out, b, sizeof(uint32_t) * 0x8000); return 0; }
+    return 1;
 }

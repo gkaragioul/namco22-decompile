@@ -28,7 +28,9 @@ void (*g_ss22_wram_watch)(uint32_t v, int size);
 #define IN_USR_DOWN  0x0080
 #define IN_USR_ENTER 0x0100
 static const ss22_action actions[] = {
+#ifndef GLMC_METAL                                  /* the Mac build has no coins (free play): no coin key */
     { "Insert coin",   "coin",    SDL_SCANCODE_5,     SDL_SCANCODE_6,       IN_COIN,      0, SS22_PAD(SDL_CONTROLLER_BUTTON_BACK) },
+#endif
     { "Gun trigger",   "trigger", SDL_SCANCODE_SPACE, SDL_SCANCODE_RETURN,  IN_TRIGGER,   0, SS22_PAD(SDL_CONTROLLER_BUTTON_A) | SS22_PAD(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER), SDL_BUTTON_LMASK },
     { "Foot pedal",    "pedal",   SDL_SCANCODE_Z,     SDL_SCANCODE_X,       IN_PEDAL,     0, SS22_PAD(SDL_CONTROLLER_BUTTON_B) | SS22_PAD(SDL_CONTROLLER_BUTTON_LEFTSHOULDER), SDL_BUTTON_RMASK | SDL_BUTTON_MMASK },
     { "Service",       "service", SDL_SCANCODE_9,     SDL_SCANCODE_UNKNOWN, IN_SERVICE,   0, 0 },
@@ -39,7 +41,19 @@ static const ss22_action actions[] = {
 };
 
 uint16_t tc2_inputs;                          /* the pressed IN_* bits, for the I/O board */
+#ifdef GLMC_METAL
+int tc2_continues_on(void);                       /* src/tc2_mem.c: Continues Off -- no trigger while the player is out of the game */
+static void tc2_send_inputs(uint16_t pressed, unsigned wheel, unsigned p1, unsigned p2)
+{
+    (void)wheel; (void)p1; (void)p2;
+    extern uint8_t tc2_ram[0x1000000];
+    if (!tc2_continues_on() && tc2_ram[0x2CEE47] == 0) pressed &= (uint16_t)~IN_TRIGGER;
+    pressed &= (uint16_t)~IN_COIN;                  /* no coins: in free play a coin still counted */
+    tc2_inputs = pressed;
+}
+#else
 static void tc2_send_inputs(uint16_t pressed, unsigned wheel, unsigned p1, unsigned p2) { (void)wheel; (void)p1; (void)p2; tc2_inputs = pressed; }
+#endif
 
 const ss22_input_game tc2_input_game = {
     actions, (int)(sizeof actions / sizeof *actions),
@@ -47,7 +61,11 @@ const ss22_input_game tc2_input_game = {
     { 0, 0 }, 0,
     { "Enter, then press the new key (Esc cancels)",
       "Mouse / absolute-mouse gun aims: left = trigger, right/middle = pedal; screen edge, R or side button = off-screen (reload). F8 = gun border",
+#ifdef GLMC_METAL
+      "Pad: either stick or the D-pad aims, A/RB trigger, B/LB pedal. Arrow keys aim too" },
+#else
       "Pad: either stick or the D-pad aims, A/RB trigger, B/LB pedal, Back coin. Arrow keys aim too; 5 = coin" },
+#endif
     tc2_send_inputs,
     IN_TEST, IN_SERVICE,
     false,                                    /* no steering motor */

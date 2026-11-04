@@ -24,6 +24,7 @@
 
 #include "eng_ui.h"
 #include "eng_crosshair.h"
+#include "eng_cfg.h"
 #include "eng_vsync.h"
 #include "eng_display.h"
 
@@ -174,6 +175,11 @@ static void aud_notes(void (*line)(const char *fmt, ...))
     if (nk_button_label(ctx, "100%")) eng_disp_set_volume(100);
 }
 static const eng_ui_page page_audio = { "Audio", 300, 120, 26, aud_n, NULL, NULL, aud_text, aud_change, aud_notes };
+#ifdef GLMC_METAL
+#include "../macos/eng_ui_simple.h"   /* the Mac build's simple Esc menu */
+#else
+void eng_ui_set_game_options(const eng_ui_game_opts *o) { (void)o; }
+#endif
 
 /* ---- the panel ------------------------------------------------------------------- */
 static int nrows(int t) { return pages[t]->nrows(); }
@@ -199,8 +205,14 @@ bool eng_ui_init(SDL_Window *win, const char *title)
     struct nk_font_config cfg = nk_font_config(0);
     nk_sdl_font_stash_begin(&atlas);
     struct nk_font *font = nk_font_atlas_add_default(atlas, 15 * ui_scale, &cfg);
+#ifdef GLMC_METAL
+    simple_add_fonts(atlas, ui_scale);
+#endif
     nk_sdl_font_stash_end();
     font->handle.height /= ui_scale;
+#ifdef GLMC_METAL
+    simple_fonts_done(ui_scale);
+#endif
     nk_style_set_font(ctx, &font->handle);
     eng_nk_style_highlight(ctx);
     /* the three every game shares come first; the game's pages are added after */
@@ -213,6 +225,9 @@ bool eng_ui_init(SDL_Window *win, const char *title)
         for (int i = 0; i < n && npages < MAXPAGES; i++) pages[npages++] = g[i];
     }
     tab = 1; row = 0;
+#ifdef GLMC_METAL
+    simple_keep_all();                         /* the simple page; the tabs behind "Advanced settings" */
+#endif
     if (getenv("ENG_UI_OPEN")) {               /* tests: open on a page at startup, "<page>[:<row>]" */
         int p = 1, r = 0; sscanf(getenv("ENG_UI_OPEN"), "%d:%d", &p, &r);
         eng_ui_goto(p, r); open_ = true;
@@ -224,6 +239,9 @@ bool eng_ui_is_open(void) { return open_; }
 bool eng_ui_quit_requested(void) { return quit_req; }
 bool eng_ui_restart_requested(void) { return restart_req; }
 void eng_ui_set_open(bool on) {
+#ifdef GLMC_METAL
+    if (on && !open_) simple_on_open();
+#endif
     open_ = on; cap_cb = NULL;
     if (input_cap_cb) { input_cap_cb(NULL, cap_u); input_cap_cb = NULL; }
     if (on && row >= nrows(tab)) row = 0;
@@ -250,7 +268,11 @@ static void nav(int k)
     case K_LEFT:  if (row < 0) tab = cyc(tab, -1, npages); else if (has_value(tab, row)) pages[tab]->change(row, -1); break;
     case K_RIGHT: if (row < 0) tab = cyc(tab, +1, npages); else if (has_value(tab, row)) pages[tab]->change(row, +1); break;
     case K_OK:    if (row < 0) row = 0; else if (row_enabled(tab, row)) pages[tab]->change(row, 0); break;
+#ifdef GLMC_METAL
+    case K_BACK:  if (!simple_back()) open_ = false; break;   /* a slot list goes back to the settings first */
+#else
     case K_BACK:  open_ = false; break;
+#endif
     case K_EXIT:  quit_req = true; break;                   /* Esc opens the menu, Esc again leaves the game */
     case K_TABPREV: tab = cyc(tab, -1, npages); row = 0; break;
     case K_TABNEXT: tab = cyc(tab, +1, npages); row = 0; break;
@@ -299,7 +321,11 @@ bool eng_ui_event(SDL_Event *e)
         case SDL_SCANCODE_LEFT: k = K_LEFT; break;
         case SDL_SCANCODE_RIGHT: k = K_RIGHT; break;
         case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: case SDL_SCANCODE_SPACE: if (!rep) k = K_OK; break;
+#ifdef GLMC_METAL
+        case SDL_SCANCODE_ESCAPE: if (!rep) k = K_BACK; break;     /* the Mac build: Esc closes the menu, back to the game (Quit is a row) */
+#else
         case SDL_SCANCODE_ESCAPE: if (!rep) k = K_EXIT; break;     /* Esc twice = exit; Backspace / pad B = back to the game */
+#endif
         case SDL_SCANCODE_BACKSPACE: if (!rep) k = K_BACK; break;
         case SDL_SCANCODE_TAB: if (!rep) k = (e->key.keysym.mod & KMOD_SHIFT) ? K_TABPREV : K_TABNEXT; break;
         case SDL_SCANCODE_PAGEUP: if (!rep) k = K_TABPREV; break;
@@ -337,6 +363,7 @@ static void note_line(const char *fmt, ...)      /* what a page's notes() calls:
 }
 
 static char hint_text[96]; static int hint_left;
+bool g_eng_ui_redraw;                                /* the host draws this game frame's picture a second time (motion smoothing) */
 void eng_ui_set_hint(const char *text, int frames) { snprintf(hint_text, sizeof hint_text, "%s", text ? text : ""); hint_left = frames; }
 
 void eng_ui_draw(bool *quit)
@@ -348,7 +375,7 @@ void eng_ui_draw(bool *quit)
         bool any = hint_left > 0 && hint_text[0];
         for (int i = 0; i < nlayers; i++) if (layers[i]->draw) { layers[i]->draw(ctx, lw, lh, false); any = true; }
         if (hint_left > 0 && hint_text[0]) {
-            hint_left--;
+            if (!g_eng_ui_redraw) hint_left--;               /* counted in game frames, not pictures */
             int hw, hh; SDL_GetWindowSize(uwin, &hw, &hh);
             const float w = 440 < hw - 8 ? 440.0f : (float)hw - 8;
             if (nk_begin(ctx, "hint", nk_rect(((float)hw - w) / 2, (float)hh - 36, w, 28), NK_WINDOW_NO_SCROLLBAR)) {
@@ -362,6 +389,9 @@ void eng_ui_draw(bool *quit)
     }
     int ww, wh;
     SDL_GetWindowSize(uwin, &ww, &wh);
+#ifdef GLMC_METAL
+    if (simple_draw(ww, wh)) { for (int i = 0; i < nlayers; i++) if (layers[i]->draw) layers[i]->draw(ctx, ww, wh, true); nk_sdl_render(NK_ANTI_ALIASING_ON); return; }
+#endif
     /* THE MENU BAR across the top of the window. The chosen page drops down under its title; on the keyboard the bar is the
      * row above the first row of the dropdown. */
     float title_w[MAXPAGES], title_x[MAXPAGES], x = 4;

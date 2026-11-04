@@ -330,8 +330,15 @@ static void dump_state(void)
 }
 
 void rr_shadow_prune(void);
+#ifdef GLMC_METAL
+#include "eng_state.h"
+void ss22_run_state(eng_st *s) { ST(s, slice); ST(s, vblank_slices); ST(s, serial_acc); }
+#endif
 void rr_tick(void)
 {
+#ifdef GLMC_METAL
+    if (g_ss22_state_req || g_ss22_state_test) ss22_state_poll();                /* Esc > Save game / Load game: here, at a poll, before the slice */
+#endif
     if (g_ss22_game->prune_shadow) rr_shadow_prune();
 #ifdef RR_TRACE
     { static unsigned lastf; static long same; extern uint32_t rr_trace_pc; extern int rr_in_irq;
@@ -391,7 +398,15 @@ void rr_tick(void)
             const bool restart = ss22_host_restart_requested();       /* File > Restart: power-cycle the cabinet */
             ss22_eeprom_save(); ss22_snd_close(); ss22_out_close(); ss22_input_close(); ss22_host_close(); fprintf(stderr, "[%s] quit at frame %u\n", g_ss22_game->tag, rr_frame);
 #ifndef _WIN32
+#ifdef GLMC_METAL
+            { void tex_hd_quit(void); tex_hd_quit(); }          /* the textures this session collected: AI-upscaled in the background */
+#endif
+#ifdef __APPLE__
+            if (restart) { fflush(NULL); char self[4096]; uint32_t sn = sizeof self; extern int _NSGetExecutablePath(char *, uint32_t *);
+                           if (_NSGetExecutablePath(self, &sn) == 0) execv(self, g_argv); perror("restart"); }
+#else
             if (restart) { fflush(NULL); execv("/proc/self/exe", g_argv); perror("restart"); }
+#endif
 #else
             (void)restart;
 #endif
@@ -437,6 +452,8 @@ void rr_tick(void)
     if (rr_frame >= max_frames) {
         dump_state();
         ss22_eeprom_save();
+        { char k[64]; snprintf(k, sizeof k, "%s_EEPROM_OUT", g_ss22_game->tag); const char *e = getenv(k);   /* tests: the EEPROM a headless run ended with */
+          FILE *f = e ? fopen(e, "wb") : NULL; if (f) { fwrite(g_ss22.eeprom, 1, SS22_EEPROM_SIZE, f); fclose(f); } }
         ss22_snd_close();
         ss22_host_close();
         ss22_env_report();
@@ -509,8 +526,9 @@ int ss22_main(int argc, char **argv, const ss22_game *g)
         if (!eng_romzip_autosetup(rom_dir, base, zips, nz, g->roms, g->n_roms, err, sizeof err)) {
             fprintf(stderr, "%s needs its ROMs: %s\n", g->name, err);
             if (win_scale) {
-                char msg[1024];
-                snprintf(msg, sizeof msg, "%s needs its ROMs.\n\nPut %s (the MAME ROM set) in the \"roms\" "
+                char msg[1024]; const char *hint = getenv("ENG_ROM_HINT");   /* a Mac app that asks for the zip says what to do instead */
+                if (hint && *hint) snprintf(msg, sizeof msg, "%s needs its ROMs.\n\n%s\n\n(%s)", g->name, hint, err);
+                else snprintf(msg, sizeof msg, "%s needs its ROMs.\n\nPut %s (the MAME ROM set) in the \"roms\" "
                          "folder next to this program, then start it again.\n\n(%s)", g->name, g->zip, err);
                 SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, g->name, msg, NULL);
             }
@@ -533,7 +551,10 @@ int ss22_main(int argc, char **argv, const ss22_game *g)
     ss22_hw_init(rom_dir);
     if (win_scale && !rep_path) ss22_eeprom_persist(nvfile);   /* a player's session keeps its options and records; headless runs (the gates) and
                                                          * replays never do: a replay plays from the recording's EEPROM and must not save it over the player's */
+    { char k[64]; snprintf(k, sizeof k, "%s_EEPROM_IN", g->tag); const char *e = getenv(k);   /* tests: start a headless run from an EEPROM image */
+      FILE *f = e ? fopen(e, "rb") : NULL; if (f) { if (fread(g_ss22.eeprom, 1, SS22_EEPROM_SIZE, f) != SS22_EEPROM_SIZE) fprintf(stderr, "[%s] short %s\n", g->tag, e); fclose(f); } }
     if (rep_path && !rep_open(rep_path)) return 2;       /* the recording's EEPROM replaces whatever was loaded */
+    if (g->eeprom_ready && !rep_path) g->eeprom_ready();  /* a replay keeps its recording's EEPROM exactly */
     static char last_rec[80];                            /* a played session always keeps its latest recording: a crash can be replayed afterwards */
     if (win_scale && !rec_path && !rep_path) { snprintf(last_rec, sizeof last_rec, "%s_last.rec", g->lname); rec_path = last_rec; }
     if (rec_path) { rec_open(rec_path); if (rec_f) fatal_rec = rec_path; }
@@ -559,6 +580,19 @@ int ss22_main(int argc, char **argv, const ss22_game *g)
     rr_budget = polls_per_frame / SLICES;
     fprintf(stderr, "[%s] reset: SP=%08X PC=%08X\n", g->tag, (uint32_t)RG4(RR_REG_SP), rr_read(4, 4));
     rr_call_push(0xFFFFFFFEu);                          /* bottom of the shadow stack */
+#ifdef GLMC_METAL
+    /* a LOADED save comes back here (engine/ss22_state.c): every C frame of the running program is dropped and the restored one resumes
+     * at the saved loop's target; its returns rebuild the call chain from the 68K stack (engine/lift_cpu.c rr_state) */
+    if (setjmp(g_ss22_resume_jb)) {
+        for (;;) {
+            rr_jump(g_ss22_resume_pc, 0xFFFFFFFFu);
+            fprintf(stderr, "[STATE] the resumed program came back to the top (ret_to %06X): going on there\n", rr_ret_to);
+            if (!rr_ret_to) break;
+            g_ss22_resume_pc = rr_ret_to;
+        }
+        return 1;
+    }
+#endif
     g->entry();                                         /* entry_reset: never returns */
     fprintf(stderr, "[%s] entry_reset returned?!\n", g->tag);
     return 1;

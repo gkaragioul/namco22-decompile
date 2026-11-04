@@ -27,6 +27,12 @@ static int rom_boot(const char *dir, uint8_t *boot)
     uint8_t *a = malloc(0x200000), *b = malloc(0x200000);
     const int ok = a && b && tc2_rom_read(dir, "tss3verb.1", a, 0x200000) && tc2_rom_read(dir, "tss3verb.2", b, 0x200000);
     if (ok) for (uint32_t k = 0; k < 0x200000; k++) { boot[2 * k] = b[k]; boot[2 * k + 1] = a[k]; }
+#ifdef GLMC_METAL
+    if (ok) {   /* the title's free-play prompt, in the player's terms: the pedal is the right mouse button (same length: it stays centred) */
+        static const char from[] = "STEP ON PEDAL TO START", to[] = " RIGHT CLICK TO START ";
+        if (!memcmp(boot + 0x2E2D70, from, sizeof from)) memcpy(boot + 0x2E2D70, to, sizeof to - 1);
+    }
+#endif
     free(a); free(b);
     return ok;
 }

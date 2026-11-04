@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <SDL2/SDL.h>
 #include "eng/eng_gl.h"
 #include "eng/eng_display.h"
@@ -208,7 +209,9 @@ int tc2_window_open(int scale, int fullscreen)
 #else
     snprintf(title, sizeof title, "%s", tc2_game.window_title);
 #endif
-    win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    const int wpos = getenv("ENG_WINDOW_DISPLAY") ? (int)SDL_WINDOWPOS_CENTERED_DISPLAY(atoi(getenv("ENG_WINDOW_DISPLAY")))
+                                                  : (int)SDL_WINDOWPOS_CENTERED;   /* tests: $ENG_WINDOW_DISPLAY=n opens on monitor n */
+    win = SDL_CreateWindow(title, wpos, wpos,
                            eng_disp_win_w(g_eng_disp.scale), eng_disp_win_h(g_eng_disp.scale),
                            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (g_eng_disp.winmode ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) { fprintf(stderr, "[HOST] window: %s\n", SDL_GetError()); return 0; }
@@ -221,7 +224,11 @@ int tc2_window_open(int scale, int fullscreen)
     { const char *e = getenv("TC2_2P"); int side = 0, od = 0;                /* $TC2_2P=1 | 2:<the first copy's monitor> */
       if (e && sscanf(e, "%d:%d", &side, &od) >= 1 && (side == 1 || side == 2)) place_2p(side, od); }
     eng_vsync_init(&vs, win, getenv("TC2_VSYNC"));
+#ifdef GLMC_METAL
+    tc2_smooth_set(eng_cfg_int("motion_smooth", 1));     /* the Mac build targets 120+ distinct pictures/s; Display > Motion smoothing turns it off */
+#else
     tc2_smooth_set(eng_cfg_int("motion_smooth", 0));
+#endif
     eng_pace_reset(&pace);
     fprintf(stderr, "[HOST] OpenGL: %s; display %d Hz, %s\n", (const char *)glGetString(GL_RENDERER), vs.hz, eng_vsync_mode(&vs));
     if (!eng_ui_init(win, "Time Crisis II")) fprintf(stderr, "[HOST] no menu\n");
@@ -281,6 +288,9 @@ static void draw_picture(void)
 static void set_pointer(int show)
 {
     if (SDL_ShowCursor(SDL_QUERY) != (show ? SDL_ENABLE : SDL_DISABLE)) SDL_ShowCursor(show ? SDL_ENABLE : SDL_DISABLE);
+#ifdef GLMC_METAL
+    { void glmc_pointer_hide(void *, int); glmc_pointer_hide(win, !show); }   /* the Mac: the system's own hide too (macos/glshim/glmc_metal.mm) */
+#endif
 #ifdef _WIN32
     static int hidden;                                           /* our own decrement of the counter is in force */
     if (!show && !hidden) { int guard = 0; while (ShowCursor(FALSE) >= 0 && ++guard < 64) {} hidden = 1; }
@@ -471,7 +481,30 @@ static int pass(int new_frame)
 void tc2_window_frame(void)
 {
     if (!win) return;
+#ifdef GLMC_METAL
+    { extern uint8_t tc2_ram[0x1000000]; static int out;           /* how to start, in the attract: out of a game (src/tc2_mem.c) for 15 s,
+                                                                     * so not over a CONTINUE countdown; free play waits for the pedal */
+      out = tc2_ram[0x2CEE47] ? 0 : out + 1;
+      if (out > 60 * 15) eng_ui_set_hint("Right click (or Z) to start  -  Esc for the menu", 2); }
+#endif
     int ok = pass(1);
     while (ok && (eng_ui_is_open() || paused)) { { void tc2_link_paused(void); tc2_link_paused(); } ok = pass(0); if (!eng_ui_is_open() && !paused) eng_vsync_resync(&vs); }
-    if (!ok) { fprintf(stderr, "[HOST] quit\n"); { void tc2_backup_save(int); tc2_backup_save(1); } { void tc2_out_close(void); tc2_out_close(); } ss22_input_close(); eng_ui_shutdown(); SDL_Quit(); exit(0); }
+    if (!ok) {
+        const bool restart = eng_ui_restart_requested();         /* Settings > Restart game: power-cycle, the program run again */
+        fprintf(stderr, "[HOST] %s\n", restart ? "restart" : "quit");
+#ifdef GLMC_METAL
+        { void tc2_hd_quit(void); tc2_hd_quit(); }               /* HD textures: the collected ones go to the upscaler (src/tc2_hd.c) */
+#endif
+        { void tc2_backup_save(int); tc2_backup_save(1); } { void tc2_out_close(void); tc2_out_close(); } ss22_input_close(); eng_ui_shutdown(); SDL_Quit();
+#ifdef __APPLE__
+        if (restart) { extern char **g_tc2_argv; fflush(NULL); char self[4096]; uint32_t sn = sizeof self; extern int _NSGetExecutablePath(char *, uint32_t *);
+                       if (_NSGetExecutablePath(self, &sn) == 0) execv(self, g_tc2_argv); perror("restart"); }
+#endif
+        exit(0);
+    }
 }
+
+/* the Esc menu's Smooth motion row (macos/eng_ui_simple.h) */
+int  eng_smooth_available(void) { return 1; }
+int  eng_smooth_is_on(void) { return tc2_smooth_on(); }
+void eng_smooth_set(int on) { tc2_smooth_set(on); }

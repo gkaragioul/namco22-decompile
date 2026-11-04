@@ -157,3 +157,12 @@ int tc2_screen_write(uint32_t p, int size, uint32_t v)
 }
 
 int tc2_screen_owns(uint32_t p) { return p >= 0x06820008u && p <= 0x0682000Du; }
+
+#ifdef GLMC_METAL
+#include "../../engine/eng_state.h"
+void tc2_screen_state(eng_st *s)
+{
+    ST(s, cyc); ST(s, off_pix); ST(s, next_vbl_on); ST(s, next_vbl_off); ST(s, next_c361); ST(s, vbl_active);
+    ST(s, c361_line); ST(s, c361_xscroll); ST(s, c361_yscroll); ST(s, rowscroll); ST(s, lastrow); ST(s, rowscroll_frame);
+}
+#endif

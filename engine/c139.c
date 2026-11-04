@@ -139,3 +139,12 @@ void c139_rx_put(const c139_frame *f)
 }
 
 c139_stats c139_get_stats(void) { return st; }
+
+#ifdef GLMC_METAL
+#include "eng_state.h"
+void c139_state(eng_st *s)
+{
+    ST(s, reg); ST(s, tx_busy); ST(s, tx_done); ST(s, rx_flag); ST(s, line_up); ST(s, read_since_up); ST(s, read_rx);
+    ST(s, txq); ST(s, rxq); ST(s, txr); ST(s, txw); ST(s, rxr); ST(s, rxw);
+}
+#endif

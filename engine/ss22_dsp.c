@@ -262,3 +262,20 @@ __attribute__((destructor)) static void lockstep_report(void)
     if (lockstep) fprintf(stderr, "[C25-LOCKSTEP] END: %ld slices, %ld differing -> %s\n", slices, bad_slices, bad_slices ? "FAIL" : "PASS");
 }
 #endif
+
+#ifdef GLMC_METAL
+/* SAVE STATES: the master C71 (its pointers -- polygon RAM, point ROM, the board hooks, the translation -- stay this run's) and the
+ * upload / slave bookkeeping */
+#include "eng_state.h"
+void ss22_dsp_state(eng_st *s)
+{
+    if (!m[0]) return;
+    ST_KEEP_BEGIN(s, *m[0]);
+    ST_KEEP(*m[0], poly); ST_KEEP(*m[0], ptrom); ST_KEEP(*m[0], render_w); ST_KEEP(*m[0], render_reset); ST_KEEP(*m[0], pdp_begin);
+    ST_KEEP(*m[0], slave_w); ST_KEEP(*m[0], port3_r); ST_KEEP(*m[0], xlat); ST_KEEP(*m[0], ops);
+    ST_KEEP_END();
+    ST(s, ctrl); ST(s, running); ST(s, irq_on); ST(s, faulted);
+    ST(s, slave_ram); ST(s, upload_state); ST(s, upload_idx); ST(s, slave_words); ST(s, slave_on);
+    ST(s, g_ss22_in_vblank);
+}
+#endif

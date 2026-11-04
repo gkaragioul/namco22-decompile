@@ -28,6 +28,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#ifdef GLMC_METAL
+#include "../macos/tex_hd.h"          /* ENG_TEX_DUMP / ENG_TEX_HD: HD texture replacement (the Mac build) */
+#endif
 
 /* ========== Texture Lookup Pipeline ========== */
 
@@ -247,6 +250,7 @@ typedef struct {
     GLuint   gl_texture;       /* per-quad path (PROPCYCL_TEXATLAS=0) */
     uint16_t a_page, a_x, a_y; /* atlas: the slot's page and position */
     float    ou, ov;           /* atlas: the slot's texcoord origin */
+    uint64_t hd_wait;          /* (Mac HD textures) baked native while this HD image decodes: redone once it is ready */
 } TexCacheEntry;
 
 static TexCacheEntry tex_cache[TEX_CACHE_SIZE];
@@ -667,6 +671,17 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
             e->texbank == texbank && e->pal_group == pal_group &&
             e->cmode == cmode && e->cap == cap &&
             e->pal_gen == g_eng_pal_gen[pal_group & 0x7F]) {
+#ifdef GLMC_METAL
+            if (e->hd_wait && tex_hd_ready(e->hd_wait)) {   /* its HD image is decoded now: bake it again (a peek reports a miss) */
+                g_tex_hd_redone++;
+                if (atlas_on()) atlas_free(e->a_page, e->a_x, e->a_y, e->alloc_w, e->alloc_h);
+                else tex_free_push(e->gl_texture, e->alloc_w, e->alloc_h);
+                tex_cache_bytes -= e->bytes;
+                tex_cache_total--;
+                e->occupied = 0;
+                break;
+            }
+#endif
             tex_frame_hits++;
             e->ref = 1;
             if (g_caplog && cap != TEX_BAKE_MAX) fprintf(g_caplog, "%d %d %d %d %d %d %d\n", min_u, min_v, range_u, range_v, texbank, pal_group, cap);
@@ -839,6 +854,10 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
     int bh = (sh < th) ? sh + 1 : sh;
     if (atlas_on()) { bw = sw + 1; bh = sh + 1; }   /* atlas slots always have room for the guard texel */
     g_bake_texels += (double)bw * bh;
+#ifdef GLMC_METAL
+    const uint8_t *hd_px = NULL; int hd_w = 0, hd_h = 0;   /* an HD replacement for this bake (macos/tex_hd.h) */
+    uint64_t hd_wait = 0;                                  /* or its HD image is still decoding */
+#endif
     /* THE HOT LOOP OF THE WHOLE RENDERER. Measured over a 3600-frame run:
      * 1046 MILLION texels baked, 14.0 s of a 17.8 s flush -- and in gameplay
      * the flush alone was 13.5 ms of a 15.9 ms frame, i.e. over the 16.67 ms
@@ -945,6 +964,11 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
             dst += 4;
         }
     }
+#ifdef GLMC_METAL
+    if (step_u == 1 && step_v == 1 && !g_tex_pow2sample) {             /* native density: dump it, or find its HD image */
+        hd_px = tex_hd_after_bake(bake_dst, (int)bake_stride, sw, sh, &hd_w, &hd_h, &hd_wait);
+    }
+#endif
     }
 
     /* Upload to GL (NEAREST filtering — pixel art, no blurring) */
@@ -969,6 +993,34 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
         /* the bake already wrote the page's shadow (above); the GL texture
          * catches up at tex_bake_commit, one dirty row band per demand */
         tex_subimages++;
+#ifdef GLMC_METAL
+        if (hd_px) {
+            /* the HD image takes a slot of its own size (+ a guard row and column repeating its edge, the CLAMP the native slot
+             * emulates); the native slot it was found in is given back. Sampled like every atlas texel: nearest, at 4x density. */
+            atlas_free(slot_page, slot_x, slot_y, bw, bh);
+            bw = hd_w + 1; bh = hd_h + 1;
+            atlas_alloc(bw, bh, &slot_page, &slot_x, &slot_y);
+            if (atlas_flush_hook) atlas_flush_hook(apages[slot_page].tex);
+            apage *hp = &apages[slot_page];
+            if (hp->shadow) {
+                for (int y = 0; y < bh; y++) {
+                    uint8_t *dst = hp->shadow + ((size_t)(slot_y + y) * ATLAS_DIM + slot_x) * 4;
+                    const uint8_t *src = hd_px + (size_t)(y < hd_h ? y : hd_h - 1) * hd_w * 4;
+                    memcpy(dst, src, (size_t)hd_w * 4);
+                    memcpy(dst + (size_t)hd_w * 4, src + (size_t)(hd_w - 1) * 4, 4);
+                }
+                page_dirty(slot_page, slot_x, slot_y, bw, bh);
+            }
+            g_bake_texels += (double)bw * bh;
+            tex = apages[slot_page].tex;
+            su = (float)hd_w / (float)ATLAS_DIM;
+            sv = (float)hd_h / (float)ATLAS_DIM;
+            if (out_su) *out_su = su;
+            if (out_sv) *out_sv = sv;
+            if (out_ou) *out_ou = (float)slot_x / ATLAS_DIM;
+            if (out_ov) *out_ov = (float)slot_y / ATLAS_DIM;
+        } else {
+#endif
         tex = apages[slot_page].tex;
         /* texel d/step of the bake sits at slot texel d/step: normalized, that
          * is ou + ((u-bmin)+cu)/brange * range/(step*DIM) */
@@ -978,7 +1030,17 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
         if (out_sv) *out_sv = sv;
         if (out_ou) *out_ou = (float)slot_x / ATLAS_DIM;
         if (out_ov) *out_ov = (float)slot_y / ATLAS_DIM;
+#ifdef GLMC_METAL
+        }
+#endif
     } else {
+#ifdef GLMC_METAL
+    if (hd_px) {                                   /* the HD image is the storage: the quad's range maps onto all of it */
+        tw = hd_w; th = hd_h;
+        if (out_su) *out_su = (float)range_u / (float)sw;
+        if (out_sv) *out_sv = (float)range_v / (float)sh;
+    }
+#endif
     int had_w = slotp->alloc_w, had_h = slotp->alloc_h;
     if (!tex) {
         tex = tex_free_pop(tw, th, &had_w, &had_h);
@@ -1022,6 +1084,13 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
                      GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         tex_reallocs++;
     }
+#ifdef GLMC_METAL
+    if (hd_px) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, hd_w, hd_h, GL_RGBA, GL_UNSIGNED_BYTE, hd_px);
+    } else
+#endif
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, bw, bh,
                     GL_RGBA, GL_UNSIGNED_BYTE, tex_pixel_buf);
     }
@@ -1070,6 +1139,11 @@ static GLuint bake_impl(int min_u, int min_v, int range_u, int range_v,
     slotp->cmode     = (uint8_t)(cmode & 0xF);
     slotp->cap       = (uint16_t)cap;
     slotp->gl_texture = tex;
+#ifdef GLMC_METAL
+    slotp->hd_wait   = hd_wait;
+#else
+    slotp->hd_wait   = 0;
+#endif
     if (atlas_on()) {
         slotp->alloc_w = (uint16_t)bw; slotp->alloc_h = (uint16_t)bh;
         slotp->a_page = (uint16_t)slot_page; slotp->a_x = (uint16_t)slot_x; slotp->a_y = (uint16_t)slot_y;
@@ -1234,3 +1308,9 @@ GLuint bake_quad_texture(int min_u, int min_v, int range_u, int range_v,
     }
     return t;
 }
+
+#ifdef GLMC_METAL
+/* the HD module's PNG reader / writer for the rest of the engine (engine/ss22_gl.c: sprite replacements) */
+uint8_t *eng_png_read(const char *path, int *w, int *h) { return tex_hd_read_png(path, w, h); }
+void eng_png_write(const char *path, const uint8_t *px, int w, int h) { tex_hd_write_png(path, px, w * 4, w, h); }
+#endif

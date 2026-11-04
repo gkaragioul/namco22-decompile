@@ -419,3 +419,20 @@ void tc2_h8_init(const char *extracted)
     snprintf(p, sizeof p, "%s/%s", extracted, tc2_game.wave[1]); if (!load(p, wave + 0x800000, 0x800000)) fprintf(stderr, "[H8] cannot read %s\n", p);
     c352_init(&c352, wave, 0x1000000);
 }
+
+#ifdef GLMC_METAL
+/* SAVE STATES: both H8s (their bus hooks and context stay this run's), their peripherals, the sub-CPU's on-chip RAM and the I/O board's
+ * RAM, the C352 (its sample ROM pointer stays), the clock chip and the board latches */
+#include "../../engine/eng_state.h"
+#define H8_KEEP(x) ST_KEEP_BEGIN(s, x); ST_KEEP(x, rd8); ST_KEEP(x, rd16); ST_KEEP(x, wr8); ST_KEEP(x, wr16); ST_KEEP(x, ctx); ST_KEEP(x, trace); ST_KEEP_END()
+#define P_KEEP(x) ST_KEEP_BEGIN(s, x); ST_KEEP(x, cpu); ST_KEEP(x, ctx); ST_KEEP(x, port_in); ST_KEEP(x, port_out); ST_KEEP(x, sci_tx); \
+                  ST_KEEP(x, sci_sync_rx); ST_KEEP(x, sci_sync_tx); ST_KEEP_END()
+void tc2_h8_state(eng_st *s)
+{
+    H8_KEEP(sub); H8_KEEP(io); P_KEEP(subp); P_KEEP(iop);
+    ST(s, sub_onchip); ST(s, io_ram); ST(s, sub_running); ST(s, sub_ok); ST(s, io_ok); ST(s, line_k);
+    ST_KEEP_BEGIN(s, c352); ST_KEEP(c352, rom); ST_KEEP_END();
+    ST(s, c352_done); ST(s, sub_p8); ST(s, sub_pa); ST(s, sub_pb); ST(s, jvs_sense_init); ST(s, io_out); ST(s, io_aout);
+    ST(s, main_now); ST(s, rtc_bits); ST(s, rtc_pos); ST(s, rtc_ce); ST(s, irq1_pin); ST(s, off_j);
+}
+#endif

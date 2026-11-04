@@ -27,7 +27,9 @@ int tc2_rom_setup(const char *dir, const char *exe_dir)
     fprintf(stderr, "[ROM] %s/%s missing: looking for %s (here, roms/, beside the program)\n", dir, miss, tc2_game.zips[0]);
     if (eng_romzip_autosetup(dir, exe_dir, tc2_game.zips, tc2_game.nzips, chips, NCHIPS, err, sizeof err)) { fprintf(stderr, "[ROM] unpacked %s into %s/\n", tc2_game.zips[0], dir); return 1; }
     fprintf(stderr, "[ROM] %s\n[ROM] Put %s in the roms/ folder beside the game.\n", err, tc2_game.zip_help);
-    snprintf(tc2_rom_error, sizeof tc2_rom_error, "%s needs its ROM file (no game data is included).\n\nPut %s in the \"roms\" folder next to the game, then start it again.\n\n(%s)",
+    const char *hint = getenv("ENG_ROM_HINT");     /* a Mac app that asks for the zip says what to do instead */
+    if (hint && *hint) snprintf(tc2_rom_error, sizeof tc2_rom_error, "%s needs its ROM file (no game data is included).\n\n%s\n\n(%s)", tc2_game.title, hint, err);
+    else snprintf(tc2_rom_error, sizeof tc2_rom_error, "%s needs its ROM file (no game data is included).\n\nPut %s in the \"roms\" folder next to the game, then start it again.\n\n(%s)",
              tc2_game.title, tc2_game.zip_help, err);
     return 0;
 }

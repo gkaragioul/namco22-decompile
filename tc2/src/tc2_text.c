@@ -17,10 +17,34 @@ static uint32_t be32p(const uint8_t *m) { return (uint32_t)m[0] << 24 | (uint32_
 static int c404(const tc2_frame_state *fs, int w) { return fs->c404[2 * w] << 8 | fs->c404[2 * w + 1]; }
 static int c404b(const tc2_frame_state *fs, int w) { return fs->c404[2 * w + 1]; }   /* the 8-bit registers */
 
+#ifdef GLMC_METAL
+/* THE TITLE PROMPT IN THE PLAYER'S TERMS (the Mac build): the title screen's STEP ON PEDAL TO START is a picture in the text layer (33 x 2
+ * tiles), not text -- the program's own string (src/tc2_game.c) is the one under the picture. Where the tile map holds exactly those tiles
+ * and their character data is exactly the original (a fingerprint), the replacement RIGHT CLICK TO START is drawn there instead, in the
+ * same colours; anything else is left alone. */
+#include "tc2_title_rep.h"
+static int title_at(const uint8_t *chr, const uint8_t *map, uint32_t *rx, uint32_t *ry)
+{
+    for (uint32_t y = 0; y + 1 < 64; y++) for (uint32_t x = 0; x + 33 <= 64; x++) {
+        if ((be16p(map + 2u * (y * 64 + x)) & 0x3FF) != title_codes[0][0]) continue;
+        int ok = 1;
+        for (uint32_t r = 0; r < 2 && ok; r++) for (uint32_t c = 0; c < 33 && ok; c++) ok = (be16p(map + 2u * ((y + r) * 64 + x + c)) & 0x3FF) == title_codes[r][c];
+        if (!ok) continue;
+        uint64_t h = 0xCBF29CE484222325ULL;
+        for (int r = 0; r < 2; r++) for (int c = 0; c < 33; c++) { const uint8_t *g = chr + 4u * ((uint32_t)title_codes[r][c] << 5); for (int k = 0; k < 128; k++) { h ^= g[k]; h *= 0x100000001B3ULL; } }
+        if (h != title_hash) return 0;
+        *rx = x; *ry = y; return 1;
+    }
+    return 0;
+}
+#endif
 /* the C361 layer into a pen map (MAME draw_text_layer): mix[] = the pen, pri[] = 4 where a pixel is opaque */
 void tc2_text_layer(const tc2_frame_state *fs, uint16_t *mix, uint8_t *pri)
 {
     const uint8_t *chr = fs->text, *map = fs->text + 0x1E000;
+#ifdef GLMC_METAL
+    uint32_t trx = 0, try_ = 0; const int title = title_at(chr, map, &trx, &try_);
+#endif
     const uint32_t palbase = ((uint32_t)c404(fs, 0x1B) << 8) & 0x7F00u;
     for (uint32_t y = 0; y < 480; y++) {
         const uint32_t sy = (y + fs->yscroll) & 0x3FF, tmy = sy >> 4, ty = sy & 0xF;
@@ -34,7 +58,10 @@ void tc2_text_layer(const tc2_frame_state *fs, uint16_t *mix, uint8_t *pri)
             const uint32_t code = (uint32_t)(t & 0x03FF) << 5;
             const uint32_t fxm = (t & 0x0400) ? 0x00 : 0x3C, fym = (t & 0x0800) ? 0x1E : 0x00;
             const uint32_t ca = code | ((ty << 1) ^ fym);
-            const uint64_t cd = (uint64_t)be32p(chr + 4u * ca) << 32 | be32p(chr + 4u * (ca | 1));
+            uint64_t cd = (uint64_t)be32p(chr + 4u * ca) << 32 | be32p(chr + 4u * (ca | 1));
+#ifdef GLMC_METAL
+            if (title && tmy - try_ < 2 && (tmx & 0x3F) - trx < 33) cd = title_rows[(tmy - try_) * 16 + ty][(tmx & 0x3F) - trx];
+#endif
             if (cd != ~0ull) {
                 const uint16_t pen_hi = (uint16_t)(palbase | ((uint32_t)(t >> 12) << 4));
                 for (int k = 0; k < span; k++) {

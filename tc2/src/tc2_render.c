@@ -110,6 +110,13 @@ static void matrot(const tc2_render_entry *e, int32_t xi, int32_t yi, int32_t zi
     *y = (e->m[3] * xi + e->m[4] * yi + e->m[5] * zi) / 4194304.f;
     *z = (e->m[6] * xi + e->m[7] * yi + e->m[8] * zi) / 4194304.f;
 }
+/* the UV box of the polygon as the model gives it, before the near clip (HD textures, src/tc2_hd.c) */
+static void uv_box(poly *p, const pvert *pv, int n)
+{
+    float u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
+    for (int i = 0; i < n; i++) { const float u = pv[i].p[1], v = pv[i].p[2]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+    p->uvbox[0] = u0; p->uvbox[1] = v0; p->uvbox[2] = u1; p->uvbox[3] = v1;
+}
 /* the near plane: keep z >= zmin, interpolating x, y and the parameters (MAME poly_manager zclip_if_less) */
 static int zclip(int n, const pvert *in, pvert *out, float zmin)
 {
@@ -248,6 +255,7 @@ static void render_model(const tc2_render_entry *e)
         { static float rej = -2; if (rej == -2) { const char *e2 = getenv("TC2_ZREJECT"); rej = e2 ? (float)atof(e2) : -1; }   /* TEST ONLY: drop a BLENDED polygon with a vertex nearer than <z> */
           if (rej >= 0 && (h >> 10 & 1)) { int nearv = 0; for (int i = 0; i < ne; i++) nearv |= pv[i].p[0] < rej; if (nearv) { if (type & 0x10000) break; continue; } } }
         poly *p = &GPOLYS[GNPOLY];
+        uv_box(p, pv, ne);
         p->n = zclip(ne, pv, p->pv, znear());
         p->blend = (int)((h >> 10) & 1);                    /* known before finish() (the TC2_XYCULL_BLEND test); effects() sets it again */
         if (p->n >= 3 && finish(p, e, (int)((h & 0x300) >> 8), polyshift, 17, 0x1FFFF, 0xFFFC0000u)) {
@@ -271,6 +279,7 @@ static void render_immediate(const tc2_render_entry *e)
     }
     if (GNPOLY >= MAX_POLYS) return;
     poly *p = &GPOLYS[GNPOLY];
+    uv_box(p, pv, ne < 4 ? ne : 4);
     p->n = zclip(ne < 4 ? ne : 4, pv, p->pv, znear());
     p->blend = (int)((h >> 10) & 1);
     if (p->n >= 3 && finish(p, e, 2, q->zbias, 16, 0xFFFF, 0xFFFE0000u)) {
@@ -289,6 +298,10 @@ static void render_direct(const tc2_render_entry *e)
     for (int t = 0; t < 2 && GNPOLY < MAX_POLYS; t++) {
         poly *p = &GPOLYS[GNPOLY];
         p->n = 3;
+        { float u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;     /* the whole quad's UV box (HD textures) */
+          for (int k = 0; k < 4; k++) { const float u = (d[4 + k * 6] >> 4) + 0.5f, v = (d[5 + k * 6] >> 4) + 0.5f;
+              if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+          p->uvbox[0] = u0; p->uvbox[1] = v0; p->uvbox[2] = u1; p->uvbox[3] = v1; }
         for (int j = 0; j < 3; j++) {
             const uint16_t *src = &d[4 + idx[t][j] * 6];
             const int mant = src[5]; int ex = src[4] & 0x3F;
@@ -554,6 +567,10 @@ static void build(tc2_built *b)
                       k, q->entry, e->type, q->model, x0, x1, y0, y1, q->zkey, q->tbase, q->cmode, q->color_base, q->prioverchar, q->vp_size_x, q->vp_size_y, q->vp_offset_x, q->vp_offset_y, q->blend, q->alpha_enabled, q->stencil);
           } } }
     tc2_render_polys += (unsigned long)GNPOLY;
+#ifdef GLMC_METAL
+    { void tc2_hd_assign(tc2_built *, const uint8_t *, const uint32_t *, const uint8_t *);   /* HD textures (src/tc2_hd.c) */
+      tc2_hd_assign(b, roms_ok ? texrom : NULL, tm_decoded, tattr_decoded); }
+#endif
     if (GFX.layers & 4) {
         static uint8_t tpri[640 * 480];                  /* the worker's alone */
         memset(b->mix, 0, sizeof b->mix); memset(tpri, 0, sizeof tpri);

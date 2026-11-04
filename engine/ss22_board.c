@@ -498,3 +498,16 @@ void ss22_eeprom_save(void)
     if (moved) { memcpy(nv_saved, g_ss22.eeprom, SS22_EEPROM_SIZE); warned = false; }
     else if (!warned) { fprintf(stderr, "[EEPROM] cannot replace %s: options and records not saved\n", nv_path); warned = true; }
 }
+
+#ifdef GLMC_METAL
+/* SAVE STATES: every RAM and register of the board -- not the program ROM (loaded from the files) and not the EEPROM (the player's
+ * settings and records stay as they are now) */
+#include <stddef.h>
+#include "eng_state.h"
+void ss22_board_state(eng_st *s)
+{
+    st_io(s, g_ss22.wram, offsetof(ss22_sys_t, eeprom) - offsetof(ss22_sys_t, wram));             /* wram, sci */
+    st_io(s, g_ss22.shared, sizeof g_ss22 - offsetof(ss22_sys_t, shared));                       /* shared .. the end */
+    ST(s, g_hw);
+}
+#endif

@@ -314,3 +314,15 @@ int tc2_c435_write(uint32_t p, int size, uint32_t v)
     return 0;
 }
 int tc2_c435_owns(uint32_t p) { return (p >= 0x0100001Cu && p <= 0x0100002Bu) || p == 0x01000060u || p == 0x0C800010u || p == 0x0C800016u; }
+
+#ifdef GLMC_METAL
+#include "../../engine/eng_state.h"
+void tc2_c435_state(eng_st *s)                            /* the command processor and both render lists (the one being filled, the one drawn) */
+{
+    ST(s, c435); ST(s, matrices); ST(s, vectors); ST(s, light_vector); ST(s, spv); ST(s, spm);
+    ST(s, absolute_priority); ST(s, model_blend_factor); ST(s, light_power); ST(s, light_ambient); ST(s, scaling);
+    ST(s, tx); ST(s, ty); ST(s, vp_offset_x); ST(s, vp_offset_y); ST(s, vp_size_x); ST(s, vp_size_y);
+    ST(s, clip_data); ST(s, clip_line); ST(s, direct_buf); ST(s, direct_pos); ST(s, direct_nonempty); ST(s, direct_open);
+    ST(s, tc2_render); ST(s, tc2_render_cur);
+}
+#endif

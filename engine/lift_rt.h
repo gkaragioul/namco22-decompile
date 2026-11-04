@@ -211,6 +211,10 @@ int  rr_irq_push(void);
 #ifdef RR_TRACE
 void rr_trace_ins(uint32_t pc);
 #define RR_INS(a) (rr_trace_ins(a), --rr_budget)
+#elif defined(GLMC_METAL)
+/* the Mac build's save states (engine/ss22_state.c): the instruction a poll follows -- a loop's branch is where a save can resume */
+extern uint32_t rr_pc_now;
+#define RR_INS(a) (rr_pc_now = (a), --rr_budget)
 #else
 #define RR_INS(a) (--rr_budget)
 #endif

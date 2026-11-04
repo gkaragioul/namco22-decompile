@@ -42,6 +42,15 @@ bool eng_ui_is_open(void);
 void eng_ui_set_open(bool on);
 bool eng_ui_quit_requested(void);                        /* File > Exit */
 bool eng_ui_restart_requested(void);                     /* File > Restart: the host re-launches the program */
+/* the game's own operator options in the Mac build's simple menu (macos/eng_ui_simple.h): which 0 = difficulty, 1 = lives,
+ * 2 = continues (count(2) 0 = not offered); count(which) choices, get/set the index, name(which, index) for the menu. Set once at start-up; NULL = the game has none. */
+typedef struct eng_ui_game_opts {
+    int  (*count)(int which);
+    int  (*get)(int which);
+    void (*set)(int which, int index);
+    const char *(*name)(int which, int index);
+} eng_ui_game_opts;
+void eng_ui_set_game_options(const eng_ui_game_opts *o);
 void eng_ui_input_begin(void);                           /* around the host's SDL_PollEvent loop */
 void eng_ui_input_end(void);
 bool eng_ui_event(SDL_Event *e);                         /* true = the menu consumed it (it is open) */

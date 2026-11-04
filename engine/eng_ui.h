@@ -50,10 +50,20 @@ bool eng_ui_is_open(void);
 void eng_ui_set_open(bool on);
 bool eng_ui_quit_requested(void);                        /* File > Exit */
 bool eng_ui_restart_requested(void);                     /* File > Restart: the host re-launches the program */
+/* the game's own operator options in the Mac build's simple menu (macos/eng_ui_simple.h): which 0 = difficulty, 1 = lives,
+ * 2 = continues (count(2) 0 = not offered); count(which) choices, get/set the index, name(which, index) for the menu. Set once at start-up; NULL = the game has none. */
+typedef struct eng_ui_game_opts {
+    int  (*count)(int which);
+    int  (*get)(int which);
+    void (*set)(int which, int index);
+    const char *(*name)(int which, int index);
+} eng_ui_game_opts;
+void eng_ui_set_game_options(const eng_ui_game_opts *o);
 void eng_ui_input_begin(void);                           /* around the host's SDL_PollEvent loop */
 void eng_ui_input_end(void);
 bool eng_ui_event(SDL_Event *e);                         /* true = the menu consumed it (it is open) */
 void eng_ui_draw(bool *quit);
+extern bool g_eng_ui_redraw;                /* set around a second draw of the same game frame: the hint countdown does not move */
 void eng_ui_set_hint(const char *text, int frames);       /* a one-line hint at the bottom of the window for `frames` frames while the menu is closed */                            /* over the picture, into the window, before the swap */
 /* the next key press is handed to cb (SDL_SCANCODE_UNKNOWN if cancelled with Esc): a key-binding row's "press a key" */
 void eng_ui_capture_key(void (*cb)(SDL_Scancode sc, void *u), void *u);

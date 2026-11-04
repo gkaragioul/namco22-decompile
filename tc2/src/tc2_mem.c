@@ -131,6 +131,52 @@ uint8_t *tc2_vram_ptr(uint32_t p)     /* for the renderers (src/tc2_text.c): a b
  * file), written through a temp file + rename when it changed (checked every 300 frames) and on exit. A file with a bad size or sum is
  * ignored, never trusted. */
 static const char *backup_path; static uint8_t backup_saved[0x10000]; static int backup_on;
+#ifdef GLMC_METAL
+/* NO COINS (the Mac build): the game's own COIN OPTIONS > FREE PLAY, always on. The backup RAM keeps two copies of the operator
+ * settings (0x000.. and 0x7800..), each with a byte-sum checksum in its last byte; free play is 0x605 / 0x7E05. A new install starts
+ * from the image the game sets up, free play already on; a saved file gets the flag (and its checksum) and keeps everything else. */
+#include "tc2_backup_freeplay.h"
+static int backup_freeplay(uint8_t *m, int fresh)
+{
+    if (fresh) { memcpy(m, tc2_backup_freeplay, sizeof tc2_backup_freeplay); fprintf(stderr, "[NV] free play (a new backup RAM)\n"); return 1; }
+    int changed = 0;
+    for (int c = 0; c < 2; c++) {
+        const uint32_t flag = c ? 0x7E05 : 0x605, ck = c ? 0x7FFF : 0x7FF;
+        if (m[flag] == 0) { m[flag] = 1; m[ck] = (uint8_t)(m[ck] + 1); changed = 1; }
+    }
+    if (changed) fprintf(stderr, "[NV] free play turned on\n");
+    return changed;
+}
+/* the simple Esc menu's Difficulty (GAME OPTIONS > DIFFICULTY, A..E = 0..4 at 0x60B) and Lives (PLAYER'S LIFE, 0x609), in both copies,
+ * each copy's checksum moved with it (found by setting them through the test menu and reading the game's own options page back) */
+#include "eng_ui.h"
+static const char *const tc2_diff_names[5] = { "Very easy", "Easy", "Normal", "Hard", "Very hard" };
+static const char *const tc2_life_names[5] = { "1", "2", "3", "4", "5" };
+static void tc2_opt_byte(uint32_t off, int v)
+{
+    uint8_t *mm = vram_mem[0];
+    for (int c = 0; c < 2; c++) {
+        const uint32_t a = (c ? 0x7E00 : 0x600) + off, ck = c ? 0x7FFF : 0x7FF;
+        mm[ck] = (uint8_t)(mm[ck] + (v - mm[a])); mm[a] = (uint8_t)v;
+    }
+}
+/* Continues Off (ours: the game has no such option): main RAM 0x2CEE47 is 1 from a game's start until its last life is lost and
+ * 0 through the CONTINUE? YES / NO countdown, game over and the attract (found in RAM dumps of 1- and 2-life games); with Continues
+ * Off the trigger is not passed on while it is 0 (src/tc2_input.c), so YES cannot be shot. Free play starts on the pedal. */
+#include "eng_cfg.h"
+static int tc2_continues = -1;
+int tc2_continues_on(void) { if (tc2_continues < 0) tc2_continues = eng_cfg_int("continues", 1) != 0; return tc2_continues; }
+static const char *const tc2_cont_names[2] = { "Off", "On" };
+static int  tc2_opt_count(int w) { return w == 2 ? 2 : 5; }
+static int  tc2_opt_get(int w)   { if (w == 2) return tc2_continues_on(); const int v = w ? vram_mem[0][0x609] - 1 : vram_mem[0][0x60B]; return v < 0 ? 0 : v > 4 ? 4 : v; }
+static void tc2_opt_set(int w, int i)
+{
+    if (w == 2) { tc2_continues = i != 0; eng_cfg_set_int("continues", tc2_continues); return; }
+    if (w) tc2_opt_byte(9, i + 1); else tc2_opt_byte(0xB, i);
+}
+static const char *tc2_opt_name(int w, int i) { return w == 2 ? tc2_cont_names[i] : w ? tc2_life_names[i] : tc2_diff_names[i]; }
+static const eng_ui_game_opts tc2_opts = { tc2_opt_count, tc2_opt_get, tc2_opt_set, tc2_opt_name };
+#endif
 void tc2_backup_load(int window)
 {
     const char *e = getenv("TC2_BACKUP");
@@ -138,6 +184,9 @@ void tc2_backup_load(int window)
     static char def[64]; snprintf(def, sizeof def, "%s%s_backup.nv", tc2_game.tag, tc2_instance());
     backup_path = e && *e ? e : window ? def : NULL;
     if (!backup_path) return;
+#ifdef GLMC_METAL
+    eng_ui_set_game_options(&tc2_opts);
+#endif
     backup_on = 1;
     uint8_t *m = vram_mem[0];
     FILE *f = fopen(backup_path, "rb");
@@ -145,17 +194,28 @@ void tc2_backup_load(int window)
         char base[64]; snprintf(base, sizeof base, "%s_backup.nv", tc2_game.tag);
         f = fopen(base, "rb"); if (f) fprintf(stderr, "[NV] no %s yet: starting from %s\n", backup_path, base);
     }
-    if (!f) { fprintf(stderr, "[NV] no %s yet: the backup RAM starts blank (the game sets its defaults)\n", backup_path); memcpy(backup_saved, m, sizeof backup_saved); return; }
+    if (!f) { fprintf(stderr, "[NV] no %s yet: the backup RAM starts blank (the game sets its defaults)\n", backup_path); memcpy(backup_saved, m, sizeof backup_saved);
+#ifdef GLMC_METAL
+              backup_freeplay(m, 1);
+#endif
+              return; }
     uint8_t hdr[8], sum4[4], buf[0x10000];
     const int ok = fread(hdr, 1, 8, f) == 8 && !memcmp(hdr, "TC2BKUP1", 8) && fread(buf, 1, sizeof buf, f) == sizeof buf && fread(sum4, 1, 4, f) == 4;
     fclose(f);
     uint32_t sum = 0; for (size_t i = 0; i < sizeof buf; i++) sum += buf[i];
     if (!ok || sum != ((uint32_t)sum4[0] << 24 | sum4[1] << 16 | sum4[2] << 8 | sum4[3])) {
         fprintf(stderr, "[NV] %s is damaged or not ours: ignored (the backup RAM starts blank)\n", backup_path);
-        memcpy(backup_saved, m, sizeof backup_saved); return;
+        memcpy(backup_saved, m, sizeof backup_saved);
+#ifdef GLMC_METAL
+        backup_freeplay(m, 1);
+#endif
+        return;
     }
     memcpy(m, buf, sizeof buf); memcpy(backup_saved, buf, sizeof buf);
     fprintf(stderr, "[NV] backup RAM loaded from %s\n", backup_path);
+#ifdef GLMC_METAL
+    backup_freeplay(m, 0);
+#endif
 }
 int tc2_crashing;                                          /* set by a fatal stop (src/tc2_cpu.c): never save then */
 void tc2_backup_save(int force)
@@ -288,3 +348,15 @@ void rr_write(uint32_t a, int size, uint32_t v)
 }
 
 void tc2_io_flush(void) { if (io_log) fflush(io_log); }
+
+#ifdef GLMC_METAL
+/* SAVE STATES: main RAM, the video RAM windows but the first (the BACKUP RAM: the player's settings and rankings stay as they are now),
+ * the RAM shared with the sub-CPU. Not the ROMs. */
+#include "../../engine/eng_state.h"
+void tc2_mem_state(eng_st *s)
+{
+    st_io(s, tc2_ram, sizeof tc2_ram);
+    for (size_t i = 1; i < sizeof vram_win / sizeof vram_win[0]; i++) st_io(s, vram_mem[i], vram_win[i].hi - vram_win[i].lo + 1);
+    st_io(s, shared_ram, sizeof shared_ram);
+}
+#endif

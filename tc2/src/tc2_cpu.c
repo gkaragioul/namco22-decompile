@@ -222,8 +222,14 @@ static void account(void)
     tc2_host_step((uint32_t)used);
 }
 extern void (*tc2_present_hook)(void);                                 /* src/tc2_window.c; NULL headless */
+#ifdef GLMC_METAL
+extern int g_tc2_state_req, g_tc2_state_test; void tc2_state_poll(void);
+#endif
 void rr_tick(void)
 {
+#ifdef GLMC_METAL
+    if (g_tc2_state_req || g_tc2_state_test) tc2_state_poll();   /* Esc > Save game / Load game: here, before the slice is counted (src/tc2_state.c) */
+#endif
     account();
     if (rr_in_irq == 0 && irq_pending()) {
         take_exception(); account();
@@ -240,3 +246,17 @@ void rr_tick(void)
 
 
 void tc2_poll_irq(void) { if (rr_in_irq == 0 && irq_pending()) take_exception(); }
+
+#ifdef GLMC_METAL
+/* SAVE STATES (src/tc2_state.c): the register file, the CP0 timer's fraction, the scheduler's slice and the interrupt pins. The shadow
+ * stack is not saved: a load resumes the program at a loop's branch target with no C frames under it, and its returns continue as jumps
+ * (rr_return finding no entry), rebuilding the call chain from the MIPS stack */
+#include "../../engine/eng_state.h"
+void tc2_cpu_state(eng_st *s)
+{
+    st_io(s, R, sizeof R);
+    ST(s, count_frac); ST(s, cycles_done); ST(s, granted); ST(s, irq_lines); ST(s, irq_on);
+    ST(s, rr_budget); ST(s, rr_frame); ST(s, rr_n_irq); ST(s, rr_pc);
+    if (s->dir == 2) { sh_n = 0; sh_target = -1; rr_in_irq = 0; rr_ret_to = 0; }
+}
+#endif

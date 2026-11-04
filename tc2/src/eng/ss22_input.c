@@ -405,6 +405,8 @@ static int aim_dz = 12;                                          /* the sticks' 
                                                                    * Time Crisis 1's engine/ss22_input.c; 12% = PAD_DEADZONE exactly) */
 static int mouse_speed = 100;                                    /* the mouse's reach, percent (mouse_speed in the cfg): the crosshair = the picture's centre + the pointer's offset x this, so 150 reaches the edges with a smaller move; 100 = the crosshair is under the pointer */
 static const int mouse_presets[] = { 100, 125, 150, 200, 300 };
+int  ss22_input_mouse_speed(void) { return mouse_speed; }       /* the Esc menu's Mouse speed (macos/eng_ui_simple.h) */
+void ss22_input_set_mouse_speed(int pct) { mouse_speed = pct < 50 ? 50 : pct > 400 ? 400 : pct; eng_cfg_set_int("mouse_speed", mouse_speed); }
 void eng_ui_set_hint(const char *text, int frames);
 static int preset_next(const int *pr, int n, int cur, int dir);
 void ss22_input_mouse_step(int dir)                                  /* F7: the next mouse-speed preset, shown on screen for two seconds */

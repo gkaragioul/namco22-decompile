@@ -59,16 +59,16 @@ void tc2_render_assets(const uint8_t **texrom, const uint32_t **tm_decoded, cons
 
 static const char *vs_poly =
     "#version 130\n"
-    "in vec4 a_pos; in vec3 a_uvs; in vec4 a_par; in vec4 a_clip; in vec2 a_ext;\n"
-    "out vec3 v_uvs; flat out vec4 v_par; flat out vec4 v_clip; flat out vec2 v_ext;\n"
-    "void main() { gl_Position = a_pos; v_uvs = a_uvs; v_par = a_par; v_clip = a_clip; v_ext = a_ext; }\n";
+    "in vec4 a_pos; in vec3 a_uvs; in vec4 a_par; in vec4 a_clip; in vec2 a_ext; in vec4 a_hd; in float a_hds;\n"
+    "out vec3 v_uvs; flat out vec4 v_par; flat out vec4 v_clip; flat out vec2 v_ext; flat out vec4 v_hd; flat out float v_hds;\n"
+    "void main() { gl_Position = a_pos; v_uvs = a_uvs; v_par = a_par; v_clip = a_clip; v_ext = a_ext; v_hd = a_hd; v_hds = a_hds; }\n";
 static const char *fs_poly =
     "#version 130\n"
-    "uniform sampler2D t_rom, t_map, t_pal, t_sten, t_near, t_nearz;\n"
+    "uniform sampler2D t_rom, t_map, t_pal, t_sten, t_near, t_nearz, t_hd;\n"
     "uniform int u_ex, u_scale, u_h, u_prio, u_pfade, u_ff, u_alpha, u_alpha_pen, u_near, u_depth;\n"
     "uniform float u_keep;\n"
     "uniform ivec3 u_pcol, u_fcol;\n"
-    "in vec3 v_uvs; flat in vec4 v_par; flat in vec4 v_clip; flat in vec2 v_ext;\n"
+    "in vec3 v_uvs; flat in vec4 v_par; flat in vec4 v_clip; flat in vec2 v_ext; flat in vec4 v_hd; flat in float v_hds;\n"
     "uint b8(vec4 t, int c) { return uint(t[c] * 255.0 + 0.5); }\n"
     "void main() {\n"
     "  ivec2 px = ivec2(int(gl_FragCoord.x) / u_scale - u_ex, int(gl_FragCoord.y) / u_scale);\n"
@@ -111,9 +111,14 @@ static const char *fs_poly =
     "    int pv = (fl >> 3) & 7;\n"
     "    gl_FragColor = vec4(pv == 7 ? 1.0 : 0.0, pv != 0 ? 1.0 : 0.0, 0.0, pv == 7 ? 1.0 : 0.0); return;\n"
     "  }\n"
-    "  uint ci = pbase + ((pen >> pshift) & pmask);\n"
-    "  vec4 c = texelFetch(t_pal, ivec2(int(ci & 255u), int((ci >> 8u) & 127u)), 0);\n"
-    "  ivec3 col = ivec3(c.rgb * 255.0 + 0.5);\n"
+    "  ivec3 col;\n"
+    "  if (v_hds > 0.5) {\n"                                              /* an HD image (src/tc2_hd.c): the atlas, bilinear, at this UV */
+    "    col = ivec3(texture(t_hd, (v_hd.xy + (v_uvs.xy - v_hd.zw) * v_hds) / vec2(16384.0, 8192.0)).rgb * 255.0 + 0.5);\n"
+    "  } else {\n"
+    "    uint ci = pbase + ((pen >> pshift) & pmask);\n"
+    "    vec4 c = texelFetch(t_pal, ivec2(int(ci & 255u), int((ci >> 8u) & 127u)), 0);\n"
+    "    col = ivec3(c.rgb * 255.0 + 0.5);\n"
+    "  }\n"
     "  int sh = clamp(int(v_uvs.z), 0, 63);\n"
     "  col = (col * sh) >> 6;\n"
     "  if (u_pfade != 0) col = (col * u_pcol) >> 8;\n"
@@ -166,8 +171,9 @@ static GLint ug[2];
 static GLuint t_band, t_rom, t_map, t_pal, t_sten, t_mix, t_col, t_prio, fbo_col, fbo_prio;
 static GLint up[20], ut[16];
 static GLuint t_near, t_nearz, fbo_near;          /* the exact-depth pre-pass target: nearest object / band (colour), its 1/z (depth) */
-enum { A_POS, A_UVS, A_PAR, A_CLIP, A_EXT };
-#define VFLOATS 17
+enum { A_POS, A_UVS, A_PAR, A_CLIP, A_EXT, A_HD, A_HDS };
+#define VFLOATS 22
+static GLuint t_hd;                                    /* the HD atlas (src/tc2_hd.c), 8192 x 8192 RGBA, made at the first upload */
 static float *verts; static size_t vcap;
 
 static GLuint shader(GLenum kind, const char *src)
@@ -186,6 +192,7 @@ static GLuint program(const char *vs, const char *fs)
     p_glAttachShader(p, v); p_glAttachShader(p, f);
     p_glBindAttribLocation(p, A_POS, "a_pos"); p_glBindAttribLocation(p, A_UVS, "a_uvs");
     p_glBindAttribLocation(p, A_PAR, "a_par"); p_glBindAttribLocation(p, A_CLIP, "a_clip"); p_glBindAttribLocation(p, A_EXT, "a_ext");
+    p_glBindAttribLocation(p, A_HD, "a_hd"); p_glBindAttribLocation(p, A_HDS, "a_hds");
     p_glLinkProgram(p);
     GLint good = 0; p_glGetProgramiv(p, GL_LINK_STATUS, &good);
     if (!good) { char log[2048]; p_glGetProgramInfoLog(p, sizeof log, NULL, log); fprintf(stderr, "[GPU] link: %s\n", log); return 0; }
@@ -270,8 +277,8 @@ int tc2_gl_init(void)
     if (!(prog_poly = program(vs_poly, fs_poly)) || !(prog_text = program(vs_text, fs_text)) || !(prog_gamma = program(vs_text, fs_gamma))) return 0;
     ug[0] = p_glGetUniformLocation(prog_gamma, "t_src"); ug[1] = p_glGetUniformLocation(prog_gamma, "t_lut");
     static const char *pn[] = { "t_rom", "t_map", "t_pal", "t_sten", "u_scale", "u_h", "u_prio", "u_pfade", "u_ff", "u_alpha", "u_alpha_pen", "u_pcol", "u_fcol", "u_ex",
-                                "t_near", "t_nearz", "u_near", "u_depth", "u_keep" };
-    for (int i = 0; i < 19; i++) up[i] = p_glGetUniformLocation(prog_poly, pn[i]);
+                                "t_near", "t_nearz", "u_near", "u_depth", "u_keep", "t_hd" };
+    for (int i = 0; i < 20; i++) up[i] = p_glGetUniformLocation(prog_poly, pn[i]);
     static const char *tn[] = { "t_mix", "t_pal", "t_prio", "u_scale", "u_h", "u_pass", "u_fade", "u_ff", "u_alpha", "u_amask", "u_c12", "u_c13", "u_fcol", "u_ex", "t_band" };
     for (int i = 0; i < 15; i++) ut[i] = p_glGetUniformLocation(prog_text, tn[i]);
 
@@ -332,12 +339,35 @@ static int fill_vertices(const tc2_built *b)
                 *o++ = (float)p->color_base; *o++ = (float)p->cmode; *o++ = (float)p->tbase; *o++ = flags;
                 *o++ = (float)ccl; *o++ = (float)ct; *o++ = (float)ccr; *o++ = (float)cb;
                 *o++ = (float)((p->entry & 0x3FFF) + 1); *o++ = (float)(p->zkey >> 21);
+                *o++ = p->hd[0]; *o++ = p->hd[1]; *o++ = p->hd[2]; *o++ = p->hd[3]; *o++ = p->hd[4];
             }
         }
     }
     return (int)need;
 }
 int tc2_depth_on(void); float tc2_depth_keep(void);   /* src/tc2_render.c: the exact-depth setting */
+/* the HD atlas: the uploads src/tc2_hd.c queued, before a frame's polygons are drawn (none, or no Mac build: a 1x1 texture, never sampled) */
+static void hd_put(int x, int y, int w, int h, const uint8_t *px)
+{
+    glBindTexture(GL_TEXTURE_2D, t_hd);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+}
+static void hd_uploads(void)
+{
+    if (!t_hd) {
+#ifdef GLMC_METAL
+        t_hd = texture(GL_RGBA8, 16384, 8192, GL_RGBA, NULL);
+#else
+        t_hd = texture(GL_RGBA8, 1, 1, GL_RGBA, NULL);
+#endif
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+#ifdef GLMC_METAL
+    int tc2_hd_uploads(void (*put)(int, int, int, int, const uint8_t *));
+    p_glActiveTexture(GL_TEXTURE6);
+    tc2_hd_uploads(hd_put);
+#endif
+}
 static void bind_tex(int unit, GLuint t) { p_glActiveTexture(GL_TEXTURE0 + unit); glBindTexture(GL_TEXTURE_2D, t); }
 static void draw_quad(void)
 {
@@ -402,6 +432,8 @@ unsigned tc2_gl_draw(const tc2_built *b)
         p_glEnableVertexAttribArray(A_PAR); p_glVertexAttribPointer(A_PAR, 4, GL_FLOAT, GL_FALSE, st, (void *)(7 * sizeof(float)));
         p_glEnableVertexAttribArray(A_CLIP); p_glVertexAttribPointer(A_CLIP, 4, GL_FLOAT, GL_FALSE, st, (void *)(11 * sizeof(float)));
         p_glEnableVertexAttribArray(A_EXT); p_glVertexAttribPointer(A_EXT, 2, GL_FLOAT, GL_FALSE, st, (void *)(15 * sizeof(float)));
+        p_glEnableVertexAttribArray(A_HD); p_glVertexAttribPointer(A_HD, 4, GL_FLOAT, GL_FALSE, st, (void *)(17 * sizeof(float)));
+        p_glEnableVertexAttribArray(A_HDS); p_glVertexAttribPointer(A_HDS, 1, GL_FLOAT, GL_FALSE, st, (void *)(21 * sizeof(float)));
         p_glUseProgram(prog_poly);
         p_glUniform1i(up[0], 0); p_glUniform1i(up[1], 1); p_glUniform1i(up[2], 2); p_glUniform1i(up[3], 3);
         p_glUniform1i(up[4], scale); p_glUniform1i(up[5], fbh);
@@ -410,6 +442,7 @@ unsigned tc2_gl_draw(const tc2_built *b)
         p_glUniform3i(up[11], f->pr, f->pg, f->pb); p_glUniform3i(up[12], f->fr, f->fg, f->fb); p_glUniform1i(up[13], ex);
         bind_tex(0, t_rom); bind_tex(1, t_map); bind_tex(2, t_pal); bind_tex(3, t_sten);
         p_glUniform1i(up[14], 4); p_glUniform1i(up[15], 5); p_glUniform1i(up[16], 0);
+        hd_uploads(); bind_tex(6, t_hd); p_glUniform1i(up[19], 6);
         const int depth = tc2_depth_on() && fbo_near;
         p_glUniform1i(up[17], 0); p_glUniform1f(up[18], tc2_depth_keep());
         if (depth) {                                     /* EXACT DEPTH pre-pass: nearest opaque object / band / 1/z per pixel */
@@ -434,8 +467,8 @@ unsigned tc2_gl_draw(const tc2_built *b)
             glDrawArrays(GL_TRIANGLES, 0, nv);
             p_glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
         }
-        for (int a = A_POS; a <= A_EXT; a++) p_glDisableVertexAttribArray((GLuint)a);
-        bind_tex(4, 0); bind_tex(5, 0); p_glActiveTexture(GL_TEXTURE0);
+        for (int a = A_POS; a <= A_HDS; a++) p_glDisableVertexAttribArray((GLuint)a);
+        bind_tex(4, 0); bind_tex(5, 0); bind_tex(6, 0); p_glActiveTexture(GL_TEXTURE0);
     }
     /* 5. the text the polygons let through again */
     if (f->layers & 4) {

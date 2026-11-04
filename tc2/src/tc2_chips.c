@@ -137,3 +137,8 @@ int tc2_chips_load(const char *path)
 }
 
 uint16_t *tc2_c412_pcz(void) { return c412.pczram; }
+
+#ifdef GLMC_METAL
+#include "../../engine/eng_state.h"
+void tc2_chips_state(eng_st *s) { ST(s, c417); ST(s, c412); ST(s, c421); ST(s, tc2_c435_pio_words); }
+#endif

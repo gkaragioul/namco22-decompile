@@ -38,3 +38,8 @@ int tc2_ctl_write(uint32_t p, int size, uint32_t v)
     shifter[p == 0x0D000006u] = p == 0x0D000006u ? tc2_ctl_p2 : tc2_ctl_p1;
     return 1;
 }
+
+#ifdef GLMC_METAL
+#include "../../engine/eng_state.h"
+void tc2_ctl_state(eng_st *s) { ST(s, shifter); ST(s, tc2_ctl_leds); }
+#endif

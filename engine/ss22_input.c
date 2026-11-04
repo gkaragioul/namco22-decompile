@@ -462,6 +462,9 @@ static int nsw(void) { return (game->test_bit ? 1 : 0) + (game->service_bit ? 1 
 static int nffb(void) { return game->wheel_motor ? (game->torque.addr ? 4 : 2) : game->kick_wheel ? 1 : 0; }   /* motor: Force feedback, FFB direction[, FFB centering, FFB road effects]; kick only: Force feedback */
 static int gun_flash_on = 1;                                     /* light-gun games: draw the shot flash (gun_flash in the cfg; ss22_gl.c hides it when 0) */
 static int ngun(void) { return game->trackball ? 12 : game->light_gun ? 5 : game->kick_wheel ? 1 : 0; }   /* Gun shot flash, Gun border, Pad aim speed, Pad aim deadzone, Pad rumble on recoil -- or (kick_wheel: Pad rumble on recoil) -- or Trackball sensitivity, orientation, keys/pad steering, keys/pad smoothing, pad+keys invert x/y, mouse invert x/y, swap stick axes, stick layout, stick deadzone, stick curve */
+/* the mouse's reach, percent (mouse_speed in the cfg, as Time Crisis II's tc2/src/eng/ss22_input.c): the crosshair = the picture's centre + the
+ * pointer's offset x this, so 150 reaches the edges with a smaller move; 100 = the crosshair under the pointer. The Esc menu's Mouse speed. */
+static int mouse_speed = 100;
 static int aim_speed = 100;                                     /* light gun: % of the default crosshair speed for the sticks / D-pad / arrow keys (aim_speed in the cfg) */
 static int aim_dz = 12;                                         /* light gun: the sticks' deadzone, % of full deflection (aim_deadzone in the cfg; 12% = the old PAD_DEADZONE) */
 static int tb_sens = 100;                                       /* trackball: % of the default counts per mouse pixel / stick deflection (tb_sens in the cfg) */
@@ -724,6 +727,9 @@ void ss22_input_init(const ss22_input_game *g)
         gun_flash_on = eng_cfg_int("gun_flash", 1) != 0;
         if (getenv("ENG_GUN_FLASH")) gun_flash_on = atoi(getenv("ENG_GUN_FLASH")) != 0;   /* tests: without touching the cfg */
         ss22_gl_set_gun_flash(gun_flash_on);
+        mouse_speed = eng_cfg_int("mouse_speed", 100);
+        if (mouse_speed < 50) mouse_speed = 50;
+        if (mouse_speed > 400) mouse_speed = 400;
         aim_speed = eng_cfg_int("aim_speed", 100);
         if (aim_speed < 25) aim_speed = 25;
         if (aim_speed > 300) aim_speed = 300;
@@ -901,6 +907,9 @@ static bool  aim_on;                                    /* the crosshair is on t
 static int   aim_src;                                   /* 0 none yet, 1 mouse, 2 stick / keys */
 bool ss22_input_aim(float *nx, float *ny) { if (!game || !game->light_gun || !aim_on) return false; *nx = aim_x; *ny = aim_y; return true; }
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+int  ss22_input_mouse_speed(void) { return mouse_speed; }
+void ss22_input_set_mouse_speed(int pct) { mouse_speed = pct < 50 ? 50 : pct > 400 ? 400 : pct; eng_cfg_set_int("mouse_speed", mouse_speed); }
+static float mouse_reach(float p) { return clamp01(0.5f + (p - 0.5f) * mouse_speed / 100.0f); }
 static void aim_update(const uint8_t *k)
 {
     static int last_mx = -1, last_my = -1;
@@ -929,12 +938,12 @@ static void aim_update(const uint8_t *k)
     if (k[SDL_SCANCODE_UP])    dy -= 1; if (k[SDL_SCANCODE_DOWN])  dy += 1;
     if (dx > 1) dx = 1; if (dx < -1) dx = -1; if (dy > 1) dy = 1; if (dy < -1) dy = -1;   /* two sticks (or a stick and a key) do not aim twice as fast */
     if (dx != 0 || dy != 0) {
-        if (aim_src == 1 && have) { aim_x = clamp01(px); aim_y = clamp01(py); }   /* start from where the mouse was */
+        if (aim_src == 1 && have) { aim_x = mouse_reach(px); aim_y = mouse_reach(py); }   /* start from where the mouse was */
         aim_src = 2; aim_on = true;
         aim_x = clamp01(aim_x + dx * 0.018f * aim_speed / 100.0f); aim_y = clamp01(aim_y + dy * 0.024f * aim_speed / 100.0f);
     } else if (aim_src == 1) {
         aim_on = have && inside;                        /* the pointer left the picture: the gun is off-screen (a reload shot) */
-        if (have) { aim_x = clamp01(px); aim_y = clamp01(py); }
+        if (have) { aim_x = mouse_reach(px); aim_y = mouse_reach(py); }
     } else if (aim_src == 0) aim_on = false;
     if ((mb_now & SDL_BUTTON_X1MASK) || k[SDL_SCANCODE_R]) aim_on = false;     /* an "aim off-screen" button / key (a reload without moving the gun) */
     g_ss22_gun_off = !aim_on;

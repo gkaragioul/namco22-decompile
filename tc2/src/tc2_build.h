@@ -17,6 +17,9 @@ typedef struct {
     int stencil, cmode, tbase, color_base, blend, prioverchar, alpha_enabled;
     int vp_size_x, vp_size_y, vp_offset_x, vp_offset_y;
     int entry, model;                                  /* the render-list entry it came from and its model (-1 = immediate / direct) */
+    float uvbox[4];                                    /* (the Mac build) the UV box of the polygon BEFORE the near clip: u0, v0, u1, v1 (src/tc2_hd.c's key --
+                                                        * a clipped polygon's UVs move every frame) */
+    float hd[5];                                       /* (the Mac build) its HD image in the atlas: x, y, the UV box's u0, v0, the scale; [4] = 0: none (src/tc2_hd.c) */
 } tc2_poly;
 /* the C404's per-frame values every polygon uses */
 typedef struct { int pr, pg, pb, alpha_color, alpha_pen, alpha, fr, fg, fb, ffactor, fflags, layers; uint32_t bg; } tc2_fx;

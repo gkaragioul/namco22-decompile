@@ -17,3 +17,8 @@ bool eng_frame_walks(bool slave_active)
 }
 
 void eng_frame_force_walk(void) { pdp_render_done = true; render_refresh = false; pdp_frame = cur_frame + 1; }
+
+#ifdef GLMC_METAL
+#include "eng_state.h"
+void frame_rule_state(eng_st *s) { ST(s, pdp_render_done); ST(s, render_refresh); ST(s, pdp_frame); ST(s, cur_frame); }
+#endif

@@ -441,3 +441,12 @@ static void cab_notes(void (*line)(const char *, ...))
 }
 static const eng_ui_page cab_page = { "Cabinet", 420, 140, 0, cab_rows, NULL, cab_enabled, cab_text, cab_change, cab_notes };
 const eng_ui_page *tc2_link_page(void) { return &cab_page; }
+
+#ifdef GLMC_METAL
+#include "../../engine/eng_state.h"
+void tc2_link_state(eng_st *s)                            /* the link chip's registers and queues (one cabinet: what the game sees) */
+{
+    ST(s, reg); ST(s, armed); ST(s, post_irq); ST(s, tx_busy); ST(s, tx_done_at);
+    ST(s, txq); ST(s, txq_n); ST(s, cur); ST(s, cur_n); ST(s, rxq); ST(s, rxq_n);
+}
+#endif

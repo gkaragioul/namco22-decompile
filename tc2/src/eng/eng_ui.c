@@ -211,6 +211,11 @@ static void aud_notes(void (*line)(const char *fmt, ...))
     if (nk_button_label(ctx, "100%")) eng_disp_set_volume(100);
 }
 static const eng_ui_page page_audio = { "Audio", 300, 120, 26, aud_n, NULL, NULL, aud_text, aud_change, aud_notes };
+#ifdef GLMC_METAL
+#include "../../../macos/eng_ui_simple.h"   /* the Mac build's simple Esc menu */
+#else
+void eng_ui_set_game_options(const eng_ui_game_opts *o) { (void)o; }
+#endif
 
 /* ---- the panel ------------------------------------------------------------------- */
 static int nrows(int t) { return pages[t]->nrows(); }
@@ -236,8 +241,14 @@ bool eng_ui_init(SDL_Window *win, const char *title)
     struct nk_font_config cfg = nk_font_config(0);
     nk_sdl_font_stash_begin(&atlas);
     struct nk_font *font = nk_font_atlas_add_default(atlas, 15 * ui_scale, &cfg);
+#ifdef GLMC_METAL
+    simple_add_fonts(atlas, ui_scale);
+#endif
     nk_sdl_font_stash_end();
     font->handle.height /= ui_scale;
+#ifdef GLMC_METAL
+    simple_fonts_done(ui_scale);
+#endif
     nk_style_set_font(ctx, &font->handle);
     /* the three every game shares come first; the game's pages are added after */
     if (npages == 0) { pages[npages++] = &page_file; pages[npages++] = &page_display; pages[npages++] = &page_audio; }
@@ -249,6 +260,9 @@ bool eng_ui_init(SDL_Window *win, const char *title)
         for (int i = 0; i < n && npages < MAXPAGES; i++) pages[npages++] = g[i];
     }
     tab = 1; row = 0;
+#ifdef GLMC_METAL
+    simple_keep_all();                         /* the simple page; the tabs behind "Advanced settings" */
+#endif
     if (getenv("ENG_UI_OPEN")) {               /* tests: open on a page at startup, "<page>[:<row>]" */
         int p = 1, r = 0; sscanf(getenv("ENG_UI_OPEN"), "%d:%d", &p, &r);
         eng_ui_goto(p, r); open_ = true;
@@ -260,6 +274,9 @@ bool eng_ui_is_open(void) { return open_; }
 bool eng_ui_quit_requested(void) { return quit_req; }
 bool eng_ui_restart_requested(void) { return restart_req; }
 void eng_ui_set_open(bool on) {
+#ifdef GLMC_METAL
+    if (on && !open_) simple_on_open();
+#endif
     open_ = on; cap_cb = NULL;
     if (input_cap_cb) { input_cap_cb(NULL, cap_u); input_cap_cb = NULL; }
     if (on && row >= nrows(tab)) row = 0;
@@ -286,7 +303,11 @@ static void nav(int k)
     case K_LEFT:  if (row < 0) tab = cyc(tab, -1, npages); else if (has_value(tab, row)) pages[tab]->change(row, -1); break;
     case K_RIGHT: if (row < 0) tab = cyc(tab, +1, npages); else if (has_value(tab, row)) pages[tab]->change(row, +1); break;
     case K_OK:    if (row < 0) row = 0; else if (row_enabled(tab, row)) pages[tab]->change(row, 0); break;
+#ifdef GLMC_METAL
+    case K_BACK:  if (!simple_back()) open_ = false; break;   /* a slot list goes back to the settings first */
+#else
     case K_BACK:  open_ = false; break;
+#endif
     case K_TABPREV: tab = cyc(tab, -1, npages); row = 0; break;
     case K_TABNEXT: tab = cyc(tab, +1, npages); row = 0; break;
     }
@@ -396,6 +417,9 @@ void eng_ui_draw(bool *quit)
     }
     int ww, wh;
     SDL_GetWindowSize(uwin, &ww, &wh);
+#ifdef GLMC_METAL
+    if (simple_draw(ww, wh)) { for (int i = 0; i < nlayers; i++) if (layers[i]->draw) layers[i]->draw(ctx, ww, wh, true); nk_sdl_render(NK_ANTI_ALIASING_ON); return; }
+#endif
     /* THE MENU BAR across the top of the window. The chosen page drops down under its title; on the keyboard the bar is the
      * row above the first row of the dropdown. */
     float title_w[MAXPAGES], title_x[MAXPAGES], x = 4;

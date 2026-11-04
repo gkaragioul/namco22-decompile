@@ -25,6 +25,7 @@
 #include "sprite_hw.h"
 #include "ss22_gl.h"
 #include "hud_edges.h"
+#include "eng_cfg.h"
 
 #define NW ENG_SCREEN_W
 #define NH ENG_SCREEN_H
@@ -45,6 +46,66 @@ static void push_quad(const geo_quad *q, void *user)
     qbuf[qn] = *q;
     qbuf[qn].order = qorder++;
     qn++;
+}
+
+/* MOTION SMOOTHING (engine/slave_list.c eng_list_mid): the in-between frame's quads, walked from a moved copy of the list */
+static geo_quad *mbuf;
+static int       mn, mcap, morder;
+static bool      mid_ready;                  /* this frame has an in-between picture (mbuf) */
+static uint32_t *mid_src;                    /* the moved list the walk reads */
+int   g_ss22_smooth = -1;                    /* Esc > Smooth motion (motion_smooth in the cfg); -1 = not read yet */
+bool  g_ss22_smooth_want;                    /* the host: the window shows more than one picture a game frame */
+unsigned long g_ss22_smooth_frames, g_ss22_smooth_cuts;
+static uint32_t mid_word(int i) { return mid_src[i & 0x7FFF]; }
+static void push_mid(const geo_quad *q, void *user)
+{
+    (void)user;
+    if (mn == mcap) {
+        int nc = mcap ? mcap * 2 : 8192;
+        geo_quad *nb = realloc(mbuf, (size_t)nc * sizeof *mbuf);
+        if (!nb) return;
+        mbuf = nb; mcap = nc;
+    }
+    mbuf[mn] = *q;
+    mbuf[mn].order = morder++;
+    mn++;
+}
+int  ss22_smooth_on(void)
+{
+    if (g_ss22_smooth < 0) {
+        const char *e = getenv("ENG_SMOOTH");                 /* tests: ENG_SMOOTH=0/1 */
+#ifdef GLMC_METAL
+        g_ss22_smooth = e ? *e == '1' : eng_cfg_int("motion_smooth", 1) != 0;   /* the Mac build targets 120 distinct pictures/s */
+#else
+        g_ss22_smooth = e ? *e == '1' : eng_cfg_int("motion_smooth", 0) != 0;
+#endif
+    }
+    return g_ss22_smooth;
+}
+void ss22_smooth_set(int on) { ss22_smooth_on(); g_ss22_smooth = on != 0; }
+int  eng_smooth_available(void) { return 1; }                /* the Esc menu's row (macos/eng_ui_simple.h) */
+int  eng_smooth_is_on(void) { return ss22_smooth_on(); }
+void eng_smooth_set(int on) { ss22_smooth_set(on); }
+bool ss22_mid_ready(void) { return mid_ready; }
+/* the frame's in-between list, when smoothing is wanted: from the previous frame's polygon RAM and this one's */
+static void build_mid(const ss22_regs *r)
+{
+    static uint32_t *prevw, *curw, *midw; static bool have_prev;
+    mid_ready = false;
+    if (!r->walk || !g_ss22_smooth_want || !ss22_smooth_on()) { have_prev = false; return; }
+    if (!prevw) { prevw = malloc(4 * 0x8000); curw = malloc(4 * 0x8000); midw = malloc(4 * 0x8000); if (!prevw || !curw || !midw) return; }
+    for (int i = 0; i < 0x8000; i++) curw[i] = r->poly_word(i);
+    if (have_prev) {
+        g_ss22_smooth_frames++;
+        if (eng_list_mid(prevw, curw, midw, ENG_LIST_HEAD_SS22, 0.5)) {
+            mid_src = midw; mn = 0; morder = 0;
+            eng_list_cfg cfg = { ENG_LIST_HEAD_SS22, 0, NULL, NULL, NULL, NULL };
+            eng_walk_list(mid_word, &cfg, push_mid, NULL);
+            eng_quad_sort(mbuf, mn, 0);
+            mid_ready = true;
+        } else g_ss22_smooth_cuts++;
+    }
+    uint32_t *t = prevw; prevw = curw; curw = t; have_prev = true;
 }
 
 /* Super 22 fog for one quad: the CZ tables (fog_hw.c), colour = the mixer's fog colour */
@@ -149,6 +210,7 @@ void ss22_prepare(const ss22_regs *r)
         eng_walk_list(r->poly_word, &cfg, push_quad, NULL);
         eng_quad_sort(qbuf, qn, 0);
     }
+    build_mid(r);
     ss22_qhist_report();
     ss22_cliplog_report();
 }
@@ -224,20 +286,82 @@ static void tex_alloc(GLuint *t)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SPR_W, SPR_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 }
 
+#ifdef GLMC_METAL
+/* SPRITE REPLACEMENTS (the Mac build): a sprite whose art is <tile> (full size w x h) is shown from $ENG_SPRITE_DIR/<tile>_<w>x<h>.png
+ * instead (the launcher points it at the app's Resources/sprites) -- any whole multiple of the size, drawn smooth. Drawn clipped (the sign
+ * wipes open: 32, 64, then 65 rows), the matching rows of the replacement are shown: from the top when the frame's first row is the art's
+ * top border (cyan), else its bottom rows. Time Crisis's tutorial sign STEP ON PEDAL TO ATTACK! is two such sprites; the Mac's pedal is
+ * the right mouse button. ENG_SPRDUMP=<dir> (tests): every sprite
+ * drawn, once per tile and size, as that file name -- the art to start a replacement from. */
+uint8_t *eng_png_read(const char *path, int *w, int *h);
+void eng_png_write(const char *path, const uint8_t *px, int w, int h);
+typedef struct { int tile, w, h, W, H; uint8_t *px; GLuint tex; } spr_rep_t;
+static spr_rep_t spr_rep[32]; static int spr_nrep = -1;
+static void spr_rep_load(void)
+{
+    spr_nrep = 0;
+    const char *d = getenv("ENG_SPRITE_DIR"); if (!d) return;
+    for (int k = 0; k < 2; k++) {                             /* the files we ship (macos/sprites): the sign's two halves */
+        static const struct { int tile, w, h; } want[2] = { { 3994, 225, 65 }, { 4008, 225, 65 } };
+        char p[1100]; snprintf(p, sizeof p, "%s/%d_%dx%d.png", d, want[k].tile, want[k].w, want[k].h);
+        int W, H; uint8_t *px = eng_png_read(p, &W, &H);
+        if (!px) continue;
+        if (W % want[k].w || H % want[k].h || W / want[k].w != H / want[k].h) { free(px); continue; }
+        spr_rep_t *r = &spr_rep[spr_nrep++]; r->tile = want[k].tile; r->w = want[k].w; r->h = want[k].h; r->W = W; r->H = H; r->px = px; r->tex = 0;
+    }
+    if (spr_nrep) fprintf(stderr, "[SPRITES] %d replacement sprite%s from %s\n", spr_nrep, spr_nrep == 1 ? "" : "s", d);
+}
+static spr_rep_t *spr_rep_find(const sprite_item *it)
+{
+    if (spr_nrep < 0) spr_rep_load();
+    for (int i = 0; i < spr_nrep; i++) if (spr_rep[i].tile == it->tile && spr_rep[i].w == it->w && it->h <= spr_rep[i].h) return &spr_rep[i];
+    return NULL;
+}
+static void spr_dump(const sprite_item *it, const uint8_t *px)
+{
+    static int on = -1, n; static char dir[600]; static int seen[512][3];
+    if (on < 0) { const char *e = getenv("ENG_SPRDUMP"); on = e != NULL; if (e) snprintf(dir, sizeof dir, "%s", e); }
+    if (!on || n >= 512) return;
+    for (int i = 0; i < n; i++) if (seen[i][0] == it->tile && seen[i][1] == it->w && seen[i][2] == it->h) return;
+    seen[n][0] = it->tile; seen[n][1] = it->w; seen[n][2] = it->h; n++;
+    char p[700]; snprintf(p, sizeof p, "%s/%d_%dx%d.png", dir, it->tile, it->w, it->h);
+    eng_png_write(p, px, it->w, it->h);
+}
+#endif
+
 /* one sprite in its turn of the merged z order: rendered into the corner of one 640x480 texture, sub-imaged, blended */
 static void draw_sprite(const sprite_item *it)
 {
     if (!spr_buf && !(spr_buf = malloc((size_t)SPR_W * SPR_H * 4))) return;
     sprite_render_item(&sst, &g_fog, it, spr_buf, 1);
+#ifdef GLMC_METAL
+    spr_dump(it, spr_buf);
+    spr_rep_t *rep = spr_rep_find(it);
+#endif
     if (it->prioverchar) {                    /* the text layer shows nothing under this sprite's pixels */
         for (int y = 0; y < it->h; y++)
             for (int x = 0; x < it->w; x++)
                 if (spr_buf[((size_t)y * it->w + x) * 4 + 3]) prio_mask[(size_t)(it->y0 + y) * SPR_W + it->x0 + x] = 1;
         prio_any = true;
     }
+    float su = (float)it->w / SPR_W, sv = (float)it->h / SPR_H, rep_v0 = 0.0f;
+#ifdef GLMC_METAL
+    if (rep) {                                                /* the replacement: its own texture, smooth */
+        if (!rep->tex) {
+            glGenTextures(1, &rep->tex); glBindTexture(GL_TEXTURE_2D, rep->tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rep->W, rep->H, 0, GL_RGBA, GL_UNSIGNED_BYTE, rep->px);
+        } else glBindTexture(GL_TEXTURE_2D, rep->tex);
+        su = 1.0f; sv = (float)it->h / rep->h;
+        const uint8_t *q = spr_buf + 2 * 4;                   /* the frame's first row: the top border, or clipped from above */
+        rep_v0 = (q[3] > 200 && q[0] < 80 && q[1] > 200 && q[2] > 200) ? 0.0f : 1.0f - sv;
+    } else
+#endif
+    {
     if (!spr_tex) tex_alloc(&spr_tex); else glBindTexture(GL_TEXTURE_2D, spr_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, it->w, it->h, GL_RGBA, GL_UNSIGNED_BYTE, spr_buf);
-    const float su = (float)it->w / SPR_W, sv = (float)it->h / SPR_H;
+    }
     glEnable(GL_TEXTURE_2D);
     glDisable(GL_ALPHA_TEST);
     glEnable(GL_BLEND);
@@ -246,10 +370,10 @@ static void draw_sprite(const sprite_item *it)
     /* widescreen: a HUD sprite goes out to its side (a sprite that is deep in the world, a billboard, stays where the 3D puts it) */
     const int dx = (g_eng_hud_e && hud_cfg && (int)(it->z & 0x1FFFFF) <= hud_cfg->sprite_zmax) ? eng_hud_dx(it->x0 + it->w / 2.0) : 0;
     glBegin(GL_QUADS);
-    glTexCoord2f(0,  0);  glVertex2f((float)(it->x0 + dx),          (float)it->y0);
-    glTexCoord2f(su, 0);  glVertex2f((float)(it->x0 + it->w + dx), (float)it->y0);
-    glTexCoord2f(su, sv); glVertex2f((float)(it->x0 + it->w + dx), (float)(it->y0 + it->h));
-    glTexCoord2f(0,  sv); glVertex2f((float)(it->x0 + dx),          (float)(it->y0 + it->h));
+    glTexCoord2f(0,  rep_v0);      glVertex2f((float)(it->x0 + dx),          (float)it->y0);
+    glTexCoord2f(su, rep_v0);      glVertex2f((float)(it->x0 + it->w + dx), (float)it->y0);
+    glTexCoord2f(su, rep_v0 + sv); glVertex2f((float)(it->x0 + it->w + dx), (float)(it->y0 + it->h));
+    glTexCoord2f(0,  rep_v0 + sv); glVertex2f((float)(it->x0 + dx),          (float)(it->y0 + it->h));
     glEnd();
     glDisable(GL_BLEND);
     glEnable(GL_ALPHA_TEST);
@@ -533,6 +657,15 @@ void ss22_draw(int vw, int vh)
     if (g_fog_valid && g_fog.have_gamma) eng_post_lut(g_fog.gamma, vw, vh);
 }
 
+/* the in-between picture (motion smoothing): the frame's own 2D layers over the moved quads */
+void ss22_draw_mid(int vw, int vh)
+{
+    geo_quad *b = qbuf; const int n = qn;
+    qbuf = mbuf; qn = mn;
+    ss22_draw(vw, vh);
+    qbuf = b; qn = n;
+}
+
 /* ------------------------------------------------------------------ GL context helpers */
 void eng_gl_context_attributes(void)
 {
@@ -548,7 +681,7 @@ static SDL_GLContext hl_ctx;
 
 bool eng_gl_open_headless(int w, int h)
 {
-#ifndef _WIN32                                          /* Windows: SDL's offscreen driver makes OpenGL only through EGL, which Windows lacks -- the hidden window below does */
+#if !defined(_WIN32) && !defined(__APPLE__)           /* Windows: SDL's offscreen driver makes OpenGL only through EGL; Apple: the Metal shim needs the real driver (no offscreen Metal view) */
     SDL_SetHint("SDL_VIDEODRIVER", "offscreen");
     setenv("SDL_VIDEODRIVER", "offscreen", 1);         /* SDL < 2.0.22 reads only the environment */
 #endif

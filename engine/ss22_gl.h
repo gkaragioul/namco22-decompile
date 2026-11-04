@@ -43,6 +43,14 @@ void ss22_gl_set_gun_flash(bool on);      /* false: hide a light-gun game's shot
 void ss22_prepare(const ss22_regs *r);
 /* Draw the prepared frame into the current framebuffer, vw x vh pixels (any number of times after one prepare). */
 void ss22_draw(int vw, int vh);
+/* MOTION SMOOTHING (Esc > Smooth motion): an in-between picture of the previous frame and this one, built by ss22_prepare when the host
+ * says it shows more than one picture a game frame (g_ss22_smooth_want) and smoothing is on; drawn with ss22_draw_mid */
+extern bool g_ss22_smooth_want;
+extern unsigned long g_ss22_smooth_frames, g_ss22_smooth_cuts;
+bool ss22_mid_ready(void);
+void ss22_draw_mid(int vw, int vh);
+int  ss22_smooth_on(void);
+void ss22_smooth_set(int on);
 int  ss22_quads(void);                       /* quads in the prepared frame */
 int  ss22_sprites(void);                     /* sprites in the prepared frame */
 
